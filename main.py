@@ -1607,10 +1607,10 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
     
     try:
         # For all fields: exact match, limit to 50 results
-            logger.info(f"[{search_type}] Executing query: SELECT * FROM {TABLE_NAME} WHERE {db_field_name} = '{search_value}' LIMIT 50")
-            response = client.table(TABLE_NAME).select("*").eq(db_field_name, search_value).limit(50).execute()
-            logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
-            logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
+        logger.info(f"[{search_type}] Executing query: SELECT * FROM {TABLE_NAME} WHERE {db_field_name} = '{search_value}' LIMIT 50")
+        response = client.table(TABLE_NAME).select("*").eq(db_field_name, search_value).limit(50).execute()
+        logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
+        logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
         
         # Field labels mapping (Russian) - use database column names
         field_labels = {
