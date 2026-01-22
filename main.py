@@ -1669,7 +1669,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                         # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                         if field_name_key == 'manager_tag':
                             tag_value = str(value).strip()
-                            message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                            message_parts.append(f"{field_label}: @{tag_value}")
                         else:
                             escaped_value = escape_html(str(value))
                             message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
@@ -1699,7 +1699,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
-                        message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                        message_parts.append(f"{field_label}: @{tag_value}")
                     else:
                         escaped_value = escape_html(str(value))
                         message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
@@ -1890,7 +1890,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                         # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                         if field_name_key == 'manager_tag':
                             tag_value = str(value).strip()
-                            message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                            message_parts.append(f"{field_label}: @{tag_value}")
                         else:
                             # Format value in code tags for easy copying
                             escaped_value = escape_html(str(value))
@@ -1922,7 +1922,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                     # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
-                        message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                        message_parts.append(f"{field_label}: @{tag_value}")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
@@ -2102,7 +2102,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                         if field_name_key == 'manager_tag':
                             tag_value = str(value).strip()
-                            message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                            message_parts.append(f"{field_label}: @{tag_value}")
                         else:
                             # Format value in code tags for easy copying
                             escaped_value = escape_html(str(value))
@@ -2134,7 +2134,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
-                        message_parts.append(f"{field_label}:&nbsp;@{tag_value}")
+                        message_parts.append(f"{field_label}: @{tag_value}")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
