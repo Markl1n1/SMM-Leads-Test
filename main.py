@@ -549,6 +549,11 @@ def get_field_label(field_name: str) -> str:
     }
     return labels.get(field_name, field_name)
 
+def is_field_filled(user_data: dict, field_name: str) -> bool:
+    """Check if field is filled (exists and has non-empty value)"""
+    value = user_data.get(field_name)
+    return value is not None and value != '' and str(value).strip() != ''
+
 def get_next_add_field(current_field: str) -> tuple[str, int, int, int]:
     """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)"""
     field_sequence = [
@@ -2204,22 +2209,13 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "Продолжайте заполнение полей вручную."
                     )
                 
-                # Determine next field to fill
-                current_state = context.user_data.get('current_state', ADD_FULLNAME)
-                state_to_field = {
-                    ADD_FULLNAME: 'fullname',
-                    ADD_MANAGER_NAME: 'manager_name',
-                    ADD_FB_LINK: 'facebook_link',
-                    ADD_TELEGRAM_NAME: 'telegram_name',
-                    ADD_TELEGRAM_ID: 'telegram_id',
-                }
-                current_field = state_to_field.get(current_state, 'fullname')
+                # Determine next field to fill - start from beginning and skip all filled fields
+                # Start from first field and skip all already filled fields
+                next_field, next_state, current_step, total_steps = get_next_add_field('')
                 
-                # Get next field that needs to be filled
-                next_field, next_state, current_step, total_steps = get_next_add_field(current_field)
-                
-                # Skip already filled fields
-                while next_field != 'review' and next_field in user_data_store[user_id]:
+                # Skip already filled fields (check both key existence and non-empty value)
+                while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
+                    logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
                     next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
                 
                 # Move to next field or review
@@ -2348,12 +2344,13 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         f"Продолжайте заполнение остальных полей."
                     )
                 
-                # Determine next field to fill
-                current_field = 'fullname'
-                next_field, next_state, current_step, total_steps = get_next_add_field(current_field)
+                # Determine next field to fill - start from beginning and skip all filled fields
+                # Start from first field and skip all already filled fields
+                next_field, next_state, current_step, total_steps = get_next_add_field('')
                 
-                # Skip already filled fields
-                while next_field != 'review' and next_field in user_data_store[user_id]:
+                # Skip already filled fields (check both key existence and non-empty value)
+                while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
+                    logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
                     next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
                 
                 # Move to next field or review
@@ -2588,6 +2585,11 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If validation failed, stay on current field
         next_field, next_state, current_step, total_steps = get_next_add_field(field_name)
     
+    # Skip already filled fields (e.g., if they were filled from forwarded message)
+    while next_field != 'review' and is_field_filled(user_data_store.get(user_id, {}), next_field):
+        logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
+        next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+    
     # Log current state before moving to next field
     if user_id in user_data_store:
         logger.info(f"[ADD_FIELD] Before moving to {next_field} - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
@@ -2805,6 +2807,11 @@ async def add_skip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Move to next field
     next_field, next_state, current_step, total_steps = get_next_add_field(field_name)
+    
+    # Skip already filled fields (e.g., if they were filled from forwarded message)
+    while next_field != 'review' and is_field_filled(user_data_store.get(user_id, {}), next_field):
+        logger.info(f"[ADD_SKIP] Skipping already filled field: {next_field}")
+        next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
     
     if next_field == 'review':
         # Show review and save option
