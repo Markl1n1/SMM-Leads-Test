@@ -619,7 +619,7 @@ def get_navigation_keyboard(is_optional: bool = False, show_back: bool = True) -
     EDIT_TELEGRAM_ID,
     EDIT_MANAGER_NAME,
     EDIT_PIN
-) = range(20)
+) = range(18)
 
 # Store user data during conversation - isolated per user_id for concurrent access
 # Each user's data is stored separately, allowing 10+ managers to work simultaneously
