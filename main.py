@@ -3779,6 +3779,9 @@ async def edit_lead_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
         user_data_store_access_time[user_id] = time.time()
         context.user_data['editing_lead_id'] = lead_id
         
+        # Reset PIN attempt counter when starting new edit
+        context.user_data['pin_attempts'] = 0
+        
         # Request PIN code before allowing editing
         message = f"🔒 Для редактирования лида (ID: {lead_id}) требуется PIN-код.\n\nВведите PIN-код:"
         # Use reply_text instead of edit_message_text to ensure ConversationHandler works correctly
@@ -3821,6 +3824,10 @@ async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     PIN_CODE = "2025"
     
     if text == PIN_CODE:
+        # PIN is correct, reset attempt counter
+        if 'pin_attempts' in context.user_data:
+            del context.user_data['pin_attempts']
+        
         # PIN is correct, show edit menu
         # Clear any old field editing state to prevent automatic transitions
         if 'current_field' in context.user_data:
@@ -3877,11 +3884,29 @@ async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return EDIT_MENU
     else:
-        # PIN is incorrect, ask again
-        await update.message.reply_text(
-            "❌ Неверный PIN-код. Попробуйте снова.\n\nВведите PIN-код:"
-        )
-        return EDIT_PIN
+        # PIN is incorrect, increment attempt counter
+        pin_attempts = context.user_data.get('pin_attempts', 0) + 1
+        context.user_data['pin_attempts'] = pin_attempts
+        
+        if pin_attempts >= 3:
+            # Too many failed attempts, return to main menu
+            await update.message.reply_text(
+                "❌ Превышено количество попыток ввода PIN-кода (3). Доступ к редактированию заблокирован.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            # Clear editing state
+            if 'editing_lead_id' in context.user_data:
+                del context.user_data['editing_lead_id']
+            if 'pin_attempts' in context.user_data:
+                del context.user_data['pin_attempts']
+            return ConversationHandler.END
+        else:
+            # PIN is incorrect, ask again
+            remaining_attempts = 3 - pin_attempts
+            await update.message.reply_text(
+                f"❌ Неверный PIN-код. Осталось попыток: {remaining_attempts}\n\nВведите PIN-код:"
+            )
+            return EDIT_PIN
 
 def get_edit_field_keyboard(user_id: int, original_data: dict = None):
     """Create keyboard for editing lead fields with change indicators"""
