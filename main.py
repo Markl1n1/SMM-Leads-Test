@@ -58,6 +58,9 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 TABLE_NAME = os.environ.get('TABLE_NAME', 'facebook_leads')  # Default table name
 PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 
+# Allowed manager names for /tag command (comma-separated list)
+ALLOWED_TAG_MANAGERS = [name.strip() for name in os.environ.get('ALLOWED_TAG_MANAGERS', '').split(',') if name.strip()] if os.environ.get('ALLOWED_TAG_MANAGERS') else []
+
 # Supabase client - thread-safe, can be used concurrently by multiple users
 supabase: Client = None
 
@@ -164,6 +167,28 @@ def normalize_tag(tag: str) -> str:
     # Remove @ if present and trim
     normalized = tag.replace('@', '').strip()
     return normalized
+
+def is_user_allowed_to_change_tags(update: Update) -> bool:
+    """Check if user is allowed to change tags based on manager_name"""
+    if not ALLOWED_TAG_MANAGERS:
+        # If no list is configured, deny access by default
+        return False
+    
+    from_user = update.effective_user
+    first_name = from_user.first_name or ""
+    last_name = from_user.last_name or ""
+    
+    # Build manager_name same way as in add_save_callback
+    if last_name:
+        manager_name = f"{first_name} {last_name}".strip()
+    else:
+        manager_name = first_name.strip()
+    
+    # Normalize manager_name (trim spaces, collapse multiple spaces)
+    manager_name = normalize_text_field(manager_name)
+    
+    # Check if this manager_name is in allowed list
+    return manager_name in ALLOWED_TAG_MANAGERS
 
 def normalize_text_field(text: str) -> str:
     """Normalize text field (fullname, manager_name): trim spaces, collapse multiple spaces, limit length"""
@@ -752,6 +777,15 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         logger.info(f"[TAG] /tag command received from user {user_id}")
         
+        # Check access
+        if not is_user_allowed_to_change_tags(update):
+            logger.warning(f"[TAG] Access denied for user {user_id}")
+            await update.message.reply_text(
+                "❌ Доступ запрещён",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
         # Clear conversation state
         clear_all_conversation_state(context, user_id)
         
@@ -826,10 +860,21 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     try:
         user_id = update.effective_user.id
+        logger.info(f"[TAG] tag_manager_callback called for user {user_id}")
+        
+        # Check access
+        if not is_user_allowed_to_change_tags(update):
+            logger.warning(f"[TAG] Access denied for user {user_id} in callback")
+            await query.edit_message_text(
+                "❌ Доступ запрещён",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
         # Extract index from callback_data
         # Format: "tag_mgr_{index}"
         callback_data = query.data
-        logger.info(f"[TAG] tag_manager_callback called for user {user_id} with callback_data: {callback_data}")
+        logger.info(f"[TAG] Processing callback_data: {callback_data}")
         
         if not callback_data.startswith("tag_mgr_"):
             logger.error(f"[TAG] Invalid callback_data: {callback_data}")
@@ -1622,7 +1667,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                             value = format_facebook_link_for_display(value)
                         
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             else:
                 # Single result
                 result = all_results[0]
@@ -1647,7 +1692,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                         value = format_facebook_link_for_display(value)
                     
                     escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
             
@@ -1834,7 +1879,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                         
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             else:
                 # Single result
                 result = results[0]
@@ -1861,7 +1906,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                     
                     # Format value in code tags for easy copying
                     escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
 
@@ -2036,7 +2081,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             else:
                 # Single result
                 result = results[0]
@@ -2063,7 +2108,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     
                     # Format value in code tags for easy copying
                     escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
 
@@ -2926,7 +2971,7 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 escaped_value = escape_html(formatted_value)
             else:
                 escaped_value = escape_html(str(value))
-            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+            message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
     
     message = "\n".join(message_parts)
     
@@ -3542,7 +3587,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         escaped_value = escape_html(formatted_value)
                     else:
                         escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
             
             # Add date
             from datetime import datetime
