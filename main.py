@@ -736,6 +736,186 @@ def clear_all_conversation_state(context: ContextTypes.DEFAULT_TYPE, user_id: in
         if user_id in user_data_store_access_time:
             del user_data_store_access_time[user_id]
 
+async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Check if user has add state initialized (from forwarded message) and enter ConversationHandler"""
+    if not update.message:
+        return None
+    
+    user_id = update.effective_user.id
+    # Check if user has add state initialized
+    if user_id in user_data_store and context.user_data.get('current_state') == ADD_FULLNAME:
+        # User has add state initialized, enter ConversationHandler
+        return ADD_FULLNAME
+    return None
+
+async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle forwarded messages globally - extract data and start add flow if needed"""
+    if not update.message:
+        return None  # Not a message update
+    
+    user_id = update.effective_user.id
+    
+    # Check if message is forwarded
+    is_forwarded = (update.message.forward_from is not None or 
+                    update.message.forward_from_chat is not None or 
+                    update.message.forward_sender_name is not None)
+    
+    if not is_forwarded:
+        return None  # Not a forwarded message, let other handlers process it
+    
+    logger.info(f"[FORWARD_GLOBAL] Forwarded message detected from user {user_id}")
+    
+    # Check if user is already in the process of adding a lead
+    # If yes, let the existing add_field_input handle it
+    if user_id in user_data_store:
+        # Check if user is in add flow (has current_field or current_state)
+        if context.user_data.get('current_field') or context.user_data.get('current_state'):
+            # User is in add flow, let add_field_input handle it
+            logger.info(f"[FORWARD_GLOBAL] User {user_id} is already in add flow, letting add_field_input handle it")
+            return None
+    
+    # User is not in add flow - start new add flow from forwarded message
+    # Check if forward_from is available (privacy settings may hide it)
+    if update.message.forward_from is None:
+        # Privacy settings hide the sender info - start normal flow
+        clear_all_conversation_state(context, user_id)
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+        context.user_data['current_field'] = 'fullname'
+        context.user_data['current_state'] = ADD_FULLNAME
+        context.user_data['add_step'] = 0
+        
+        field_label = get_field_label('fullname')
+        _, _, current_step, total_steps = get_next_add_field('')
+        message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:"
+        
+        await update.message.reply_text(
+            "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n" + message,
+            reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
+            parse_mode='HTML'
+        )
+        # Return None - the next message from user will be handled by ConversationHandler
+        # The state is already set in context.user_data, so ConversationHandler will process it
+        return None
+    else:
+        forward_from = update.message.forward_from
+        
+        # Check if it's a bot
+        if forward_from.is_bot:
+            await update.message.reply_text(
+                "❌ Недоступно. Аккаунт является ботом.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Initialize add flow
+        clear_all_conversation_state(context, user_id)
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+        context.user_data['current_field'] = 'fullname'
+        context.user_data['current_state'] = ADD_FULLNAME
+        context.user_data['add_step'] = 0
+        
+        # Extract data from forward_from
+        extracted_data = {}
+        extracted_info = []
+        
+        # Extract telegram_id (required if available)
+        if forward_from.id:
+            telegram_id = normalize_telegram_id(str(forward_from.id))
+            if telegram_id:
+                extracted_data['telegram_id'] = telegram_id
+                extracted_info.append(f"• Telegram ID: {telegram_id}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted telegram_id: {telegram_id}")
+        
+        # Extract telegram_name (if available)
+        if forward_from.username:
+            is_valid, _, normalized = validate_telegram_name(forward_from.username)
+            if is_valid:
+                extracted_data['telegram_name'] = normalized
+                extracted_info.append(f"• Username: @{normalized}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted telegram_name: {normalized}")
+        
+        # Extract fullname (Display Name: first_name + last_name)
+        first_name = forward_from.first_name or ""
+        last_name = forward_from.last_name or ""
+        if first_name or last_name:
+            if last_name:
+                fullname = f"{first_name} {last_name}".strip()
+            else:
+                fullname = first_name
+            normalized_fullname = normalize_text_field(fullname)
+            if normalized_fullname:
+                extracted_data['fullname'] = normalized_fullname
+                extracted_info.append(f"• Имя: {normalized_fullname}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted fullname: {normalized_fullname}")
+        
+        # Parse text message for Facebook link (if available)
+        if update.message.text:
+            text = update.message.text.strip()
+            is_valid_fb, _, fb_normalized = validate_facebook_link(text)
+            if is_valid_fb:
+                extracted_data['facebook_link'] = fb_normalized
+                extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from message text: {fb_normalized}")
+        
+        # Save extracted data to user_data_store
+        for key, value in extracted_data.items():
+            user_data_store[user_id][key] = value
+        
+        # Update access time
+        user_data_store_access_time[user_id] = time.time()
+        
+        # Show user what was extracted
+        if extracted_info:
+            info_text = "\n".join(extracted_info)
+            await update.message.reply_text(
+                f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\n"
+                f"Продолжайте заполнение остальных полей."
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Не удалось извлечь данные из пересланного сообщения.\n\n"
+                "Продолжайте заполнение полей вручную."
+            )
+        
+        # Determine next field to fill - start from beginning and skip all filled fields
+        next_field, next_state, current_step, total_steps = get_next_add_field('')
+        
+        # Skip already filled fields
+        while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
+            logger.info(f"[FORWARD_GLOBAL] Skipping already filled field: {next_field}")
+            next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+        
+        # Move to next field or review
+        if next_field == 'review':
+            await show_add_review(update, context)
+            # Return None to let ConversationHandler handle the state transition
+            return None
+        else:
+            field_label = get_field_label(next_field)
+            is_optional = next_field not in ['fullname']
+            progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+            
+            if next_field == 'fullname':
+                message = f"{progress_text}📝 Введите {field_label}:"
+            else:
+                requirements = get_field_format_requirements(next_field)
+                message = f"{progress_text}📝 Введите {field_label}:\n\n{requirements}"
+            
+            context.user_data['current_field'] = next_field
+            context.user_data['current_state'] = next_state
+            
+            sent_message = await update.message.reply_text(
+                message,
+                reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
+                parse_mode='HTML'
+            )
+            await save_add_message(update, context, sent_message.message_id)
+            # Return None - the next message from user will be handled by ConversationHandler
+            # The state is already set in context.user_data, so ConversationHandler will process it
+            return None
+
 # Command handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show main menu"""
@@ -4603,6 +4783,15 @@ def create_telegram_app():
     telegram_app.add_handler(CommandHandler("tag", tag_command))
     # Note: /q command has high priority and will work from any state
     
+    # Global handler for forwarded messages (register BEFORE ConversationHandlers)
+    # This allows forwarding messages to work from any state
+    # The handler returns None if user is already in add flow, allowing add_field_input to handle it
+    forwarded_message_handler = MessageHandler(
+        filters.FORWARDED,
+        handle_forwarded_message
+    )
+    telegram_app.add_handler(forwarded_message_handler)
+    
     # Smart check conversation handler (register FIRST to have priority)
     smart_check_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(check_menu_callback, pattern="^check_menu$")],
@@ -4692,7 +4881,11 @@ def create_telegram_app():
     
     # Conversation handler for adding - sequential flow
     add_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(add_new_callback, pattern="^add_new$")],
+        entry_points=[
+            CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
+            # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry)
+        ],
         states={
             ADD_FULLNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
