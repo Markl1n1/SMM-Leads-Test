@@ -776,19 +776,23 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return ConversationHandler.END
         
+        # Store manager names in context for later retrieval (to avoid long callback_data)
+        context.user_data['tag_manager_names'] = manager_names
+        
         # Create keyboard with manager names
         keyboard = []
         # Add buttons in rows of 2
+        # Use index in callback_data instead of full name to avoid exceeding 64 byte limit
         for i in range(0, len(manager_names), 2):
             row = []
             row.append(InlineKeyboardButton(
                 manager_names[i],
-                callback_data=f"tag_manager_{manager_names[i]}"
+                callback_data=f"tag_mgr_{i}"
             ))
             if i + 1 < len(manager_names):
                 row.append(InlineKeyboardButton(
                     manager_names[i + 1],
-                    callback_data=f"tag_manager_{manager_names[i + 1]}"
+                    callback_data=f"tag_mgr_{i + 1}"
                 ))
             keyboard.append(row)
         
@@ -821,10 +825,10 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     try:
-        # Extract manager_name from callback_data
-        # Format: "tag_manager_{manager_name}"
+        # Extract index from callback_data
+        # Format: "tag_mgr_{index}"
         callback_data = query.data
-        if not callback_data.startswith("tag_manager_"):
+        if not callback_data.startswith("tag_mgr_"):
             logger.error(f"[TAG] Invalid callback_data: {callback_data}")
             await query.edit_message_text(
                 "❌ Ошибка: неверные данные. Попробуйте снова.",
@@ -832,14 +836,29 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return ConversationHandler.END
         
-        manager_name = callback_data.replace("tag_manager_", "", 1)
-        
-        if not manager_name:
+        # Extract index
+        try:
+            index_str = callback_data.replace("tag_mgr_", "", 1)
+            index = int(index_str)
+        except (ValueError, IndexError):
+            logger.error(f"[TAG] Invalid index in callback_data: {callback_data}")
             await query.edit_message_text(
-                "❌ Ошибка: не удалось определить менеджера. Попробуйте снова.",
+                "❌ Ошибка: неверный индекс. Попробуйте снова.",
                 reply_markup=get_main_menu_keyboard()
             )
             return ConversationHandler.END
+        
+        # Get manager name from stored list
+        manager_names = context.user_data.get('tag_manager_names')
+        if not manager_names or index < 0 or index >= len(manager_names):
+            logger.error(f"[TAG] Invalid index {index} for manager_names list of length {len(manager_names) if manager_names else 0}")
+            await query.edit_message_text(
+                "❌ Ошибка: не удалось определить менеджера. Попробуйте снова с команды /tag",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        manager_name = manager_names[index]
         
         # Save manager_name to context
         context.user_data['tag_manager_name'] = manager_name
@@ -4669,7 +4688,7 @@ def create_telegram_app():
         entry_points=[CommandHandler("tag", tag_command)],
         states={
             TAG_SELECT_MANAGER: [
-                CallbackQueryHandler(tag_manager_callback, pattern="^tag_manager_"),
+                CallbackQueryHandler(tag_manager_callback, pattern="^tag_mgr_\\d+$"),
                 CommandHandler("q", quit_command),
                 CommandHandler("start", start_command),
             ],
