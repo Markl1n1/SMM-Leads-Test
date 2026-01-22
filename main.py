@@ -1852,7 +1852,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                             message_parts.append(f"{field_label}: @{tag_value}")
                         else:
                             escaped_value = escape_html(str(value))
-                            message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             else:
                 # Single result
                 result = all_results[0]
@@ -1882,7 +1882,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                         message_parts.append(f"{field_label}: @{tag_value}")
                     else:
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
             
@@ -2074,7 +2074,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                         else:
                             # Format value in code tags for easy copying
                             escaped_value = escape_html(str(value))
-                            message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             else:
                 # Single result
                 result = results[0]
@@ -2106,7 +2106,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
 
@@ -2286,7 +2286,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         else:
                             # Format value in code tags for easy copying
                             escaped_value = escape_html(str(value))
-                            message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             else:
                 # Single result
                 result = results[0]
@@ -2318,7 +2318,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             
             message = "\n".join(message_parts)
 
@@ -3181,7 +3181,7 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 escaped_value = escape_html(formatted_value)
             else:
                 escaped_value = escape_html(str(value))
-            message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
     
     message = "\n".join(message_parts)
     
@@ -3797,7 +3797,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         escaped_value = escape_html(formatted_value)
                     else:
                         escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}:&nbsp;<code>{escaped_value}</code>")
+                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             
             # Add date
             from datetime import datetime
