@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS facebook_leads (
     telegram_user TEXT,
     telegram_id TEXT,
     
+    -- Тег менеджера (Telegram username того, кто добавил лид)
+    manager_tag TEXT,
+    
     -- Автоматическая дата создания
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW() NOT NULL
 );
@@ -65,6 +68,7 @@ COMMENT ON COLUMN facebook_leads.phone IS 'Номер телефона (норм
 COMMENT ON COLUMN facebook_leads.facebook_link IS 'Ссылка на Facebook профиль (username или profile.php?id=...)';
 COMMENT ON COLUMN facebook_leads.telegram_user IS 'Telegram username (без @)';
 COMMENT ON COLUMN facebook_leads.telegram_id IS 'Telegram ID (только цифры)';
+COMMENT ON COLUMN facebook_leads.manager_tag IS 'Telegram username менеджера, добавившего лида (без @)';
 COMMENT ON COLUMN facebook_leads.created_at IS 'Дата и время создания записи';
 
 -- Представление для удобного просмотра данных (опционально)
@@ -77,6 +81,7 @@ SELECT
     facebook_link,
     telegram_user,
     telegram_id,
+    manager_tag,
     created_at,
     CASE 
         WHEN phone IS NOT NULL AND phone != '' THEN 'Phone'

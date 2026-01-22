@@ -157,6 +157,14 @@ def normalize_telegram_id(tg_id: str) -> str:
     # Remove all non-digit characters
     return ''.join(filter(str.isdigit, tg_id))
 
+def normalize_tag(tag: str) -> str:
+    """Normalize tag: remove @ symbol, trim spaces"""
+    if not tag:
+        return ""
+    # Remove @ if present and trim
+    normalized = tag.replace('@', '').strip()
+    return normalized
+
 def normalize_text_field(text: str) -> str:
     """Normalize text field (fullname, manager_name): trim spaces, collapse multiple spaces, limit length"""
     if not text:
@@ -558,7 +566,6 @@ def get_next_add_field(current_field: str) -> tuple[str, int, int, int]:
     """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)"""
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        ('manager_name', ADD_MANAGER_NAME),
         ('facebook_link', ADD_FB_LINK),
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
@@ -623,8 +630,11 @@ def get_navigation_keyboard(is_optional: bool = False, show_back: bool = True) -
     EDIT_TELEGRAM_NAME,
     EDIT_TELEGRAM_ID,
     EDIT_MANAGER_NAME,
-    EDIT_PIN
-) = range(18)
+    EDIT_PIN,
+    # Tag states
+    TAG_SELECT_MANAGER,  # Selection of manager from list
+    TAG_ENTER_NEW  # Enter new tag
+) = range(20)
 
 # Store user data during conversation - isolated per user_id for concurrent access
 # Each user's data is stored separately, allowing 10+ managers to work simultaneously
@@ -731,6 +741,126 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await retry_telegram_api(
                 update.message.reply_text,
                 text="❌ Произошла ошибка при обработке команды. Попробуйте позже."
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
+async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /tag command - show list of manager_name to change tag"""
+    try:
+        user_id = update.effective_user.id
+        logger.info(f"[TAG] /tag command received from user {user_id}")
+        
+        # Clear conversation state
+        clear_all_conversation_state(context, user_id)
+        
+        # Get Supabase client
+        client = get_supabase_client()
+        if not client:
+            error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+            await update.message.reply_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        
+        # Get unique manager names
+        manager_names = get_unique_manager_names(client)
+        
+        if not manager_names:
+            await update.message.reply_text(
+                "❌ В базе данных нет записей с manager_name.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Create keyboard with manager names
+        keyboard = []
+        # Add buttons in rows of 2
+        for i in range(0, len(manager_names), 2):
+            row = []
+            row.append(InlineKeyboardButton(
+                manager_names[i],
+                callback_data=f"tag_manager_{manager_names[i]}"
+            ))
+            if i + 1 < len(manager_names):
+                row.append(InlineKeyboardButton(
+                    manager_names[i + 1],
+                    callback_data=f"tag_manager_{manager_names[i + 1]}"
+                ))
+            keyboard.append(row)
+        
+        # Add main menu button
+        keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await update.message.reply_text(
+            "🏷️ <b>Выберите менеджера для смены тега:</b>",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+        return TAG_SELECT_MANAGER
+    except Exception as e:
+        logger.error(f"Error in tag_command: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке команды. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
+async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle selection of manager from tag command"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Extract manager_name from callback_data
+        # Format: "tag_manager_{manager_name}"
+        callback_data = query.data
+        if not callback_data.startswith("tag_manager_"):
+            logger.error(f"[TAG] Invalid callback_data: {callback_data}")
+            await query.edit_message_text(
+                "❌ Ошибка: неверные данные. Попробуйте снова.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        manager_name = callback_data.replace("tag_manager_", "", 1)
+        
+        if not manager_name:
+            await query.edit_message_text(
+                "❌ Ошибка: не удалось определить менеджера. Попробуйте снова.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Save manager_name to context
+        context.user_data['tag_manager_name'] = manager_name
+        
+        # Ask for new tag
+        await query.edit_message_text(
+            f"🏷️ <b>Менеджер:</b> {escape_html(manager_name)}\n\n"
+            f"📝 Введите новый тег (с @ или без):",
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отменить", callback_data="tag_cancel")]
+            ])
+        )
+        
+        return TAG_ENTER_NEW
+    except Exception as e:
+        logger.error(f"Error in tag_manager_callback: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                "❌ Произошла ошибка. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
             )
         except:
             pass
@@ -1417,6 +1547,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
             'telegram_user': 'Имя пользователя Telegram',
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
+            'manager_tag': 'Тег',
             'created_at': 'Дата'
         }
         
@@ -1624,6 +1755,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             'telegram_user': 'Имя пользователя Telegram',  # Changed from telegram_name to telegram_user
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
+            'manager_tag': 'Тег',
             'created_at': 'Дата'
         }
         
@@ -1817,6 +1949,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'telegram_user': 'Имя пользователя Telegram',  # Changed from telegram_name to telegram_user
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
+            'manager_tag': 'Тег',
             'created_at': 'Дата'
         }
         
@@ -2104,6 +2237,83 @@ async def check_duplicate_realtime(client, field_name: str, field_value: str) ->
         logger.error(f"Error checking real-time duplicate for {field_name}: {e}", exc_info=True)
         return True, ""  # On error, allow to continue (will be checked again on save)
 
+async def tag_enter_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle new tag input"""
+    if not update.message or not update.message.text:
+        logger.error("[TAG] update.message or update.message.text is None")
+        return ConversationHandler.END
+    
+    try:
+        user_id = update.effective_user.id
+        text = update.message.text.strip()
+        
+        # Normalize tag
+        normalized_tag = normalize_tag(text)
+        
+        if not normalized_tag:
+            await update.message.reply_text(
+                "❌ Тег не может быть пустым. Попробуйте снова:",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("❌ Отменить", callback_data="tag_cancel")]
+                ])
+            )
+            return TAG_ENTER_NEW
+        
+        # Get manager_name from context
+        manager_name = context.user_data.get('tag_manager_name')
+        if not manager_name:
+            logger.error("[TAG] manager_name not found in context")
+            await update.message.reply_text(
+                "❌ Ошибка: не удалось определить менеджера. Попробуйте снова с команды /tag",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Get Supabase client
+        client = get_supabase_client()
+        if not client:
+            error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+            await update.message.reply_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        
+        # Count records that will be updated
+        record_count = count_records_by_manager_name(client, manager_name)
+        
+        # Save new tag to context
+        context.user_data['tag_new_tag'] = normalized_tag
+        
+        # Show confirmation
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Подтвердить", callback_data="tag_confirm")],
+            [InlineKeyboardButton("❌ Отменить", callback_data="tag_cancel")]
+        ])
+        
+        await update.message.reply_text(
+            f"📋 <b>Подтверждение обновления тега</b>\n\n"
+            f"<b>Менеджер:</b> {escape_html(manager_name)}\n"
+            f"<b>Новый тег:</b> <code>{escape_html(normalized_tag)}</code>\n"
+            f"<b>Будет обновлено записей:</b> {record_count}\n\n"
+            f"Подтвердите обновление:",
+            reply_markup=keyboard,
+            parse_mode='HTML'
+        )
+        
+        return TAG_ENTER_NEW
+    except Exception as e:
+        logger.error(f"Error in tag_enter_new: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(
+                "❌ Произошла ошибка. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
 async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Universal handler for field input - sequential flow"""
     if not update.message:
@@ -2224,7 +2434,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return ADD_REVIEW
                 else:
                     field_label = get_field_label(next_field)
-                    is_optional = next_field not in ['fullname', 'manager_name']
+                    is_optional = next_field not in ['fullname']
                     progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
                     
                     if next_field == 'manager_name':
@@ -2359,7 +2569,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     return ADD_REVIEW
                 else:
                     field_label = get_field_label(next_field)
-                    is_optional = next_field not in ['fullname', 'manager_name']
+                    is_optional = next_field not in ['fullname']
                     progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
                     
                     if next_field == 'manager_name':
@@ -2395,7 +2605,6 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Map ConversationHandler states to field names
     state_to_field = {
         ADD_FULLNAME: 'fullname',
-        ADD_MANAGER_NAME: 'manager_name',
         ADD_FB_LINK: 'facebook_link',
         ADD_TELEGRAM_NAME: 'telegram_name',
         ADD_TELEGRAM_ID: 'telegram_id',
@@ -2504,7 +2713,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(
                     f"❌ {field_label} слишком длинное (максимум 500 символов).\n\n"
                     f"📝 Введите {field_label}:",
-                    reply_markup=get_navigation_keyboard(is_optional=(field_name not in ['fullname', 'manager_name']), show_back=True),
+                    reply_markup=get_navigation_keyboard(is_optional=(field_name not in ['fullname']), show_back=True),
                     parse_mode='HTML'
                 )
                 await save_add_message(update, context, update.message.message_id)
@@ -2519,13 +2728,10 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 validation_passed = False
         else:
             field_label = get_field_label(field_name)
-            is_optional = field_name not in ['fullname', 'manager_name']
+            is_optional = field_name not in ['fullname']
             
-            # Для обязательных полей (fullname, manager_name) не показываем требования к формату
-            if field_name == 'manager_name':
-                message = f"❌ Поле не может быть пустым.\n\n📝 Введите стейдж менеджера:\n\n ⚠️ Так менеджер записан в отчётности"
-                use_html = False
-            elif field_name == 'fullname':
+            # Для обязательных полей (fullname) не показываем требования к формату
+            if field_name == 'fullname':
                 message = f"❌ Поле не может быть пустым.\n\n📝 Введите {field_label}:"
                 use_html = False
             else:
@@ -2663,7 +2869,6 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     field_labels = {
         'fullname': 'Имя Фамилия',
-        'manager_name': 'Агент',
         'facebook_link': 'Facebook Ссылка',
         'telegram_name': 'Имя пользователя Telegram',
         'telegram_id': 'Telegram ID'
@@ -2765,6 +2970,61 @@ def check_fields_uniqueness_batch(client, fields_to_check: dict) -> tuple[bool, 
         logger.error(f"Error checking batch uniqueness: {e}", exc_info=True)
         # On error, assume not unique to prevent duplicate inserts
         return False, "unknown"
+
+def get_unique_manager_names(client) -> list[str]:
+    """Get list of unique manager_name values from database"""
+    try:
+        # Get all records and extract unique manager_name values
+        # Note: Supabase Python client doesn't support DISTINCT directly in select,
+        # so we fetch all and extract unique values in Python
+        response = client.table(TABLE_NAME).select("manager_name").execute()
+        
+        if not response.data:
+            return []
+        
+        # Extract unique manager_name values (excluding None and empty strings)
+        unique_names = set()
+        for record in response.data:
+            manager_name = record.get('manager_name')
+            if manager_name and manager_name.strip():
+                unique_names.add(manager_name.strip())
+        
+        # Sort alphabetically and return as list
+        return sorted(list(unique_names))
+    except Exception as e:
+        logger.error(f"Error getting unique manager names: {e}", exc_info=True)
+        return []
+
+@retry_supabase_query(max_retries=3, delay=1, backoff=2)
+def update_manager_tag_by_name(client, manager_name: str, new_tag: str) -> int:
+    """Update manager_tag for all records with given manager_name"""
+    try:
+        # Normalize the tag
+        normalized_tag = normalize_tag(new_tag)
+        
+        # Update all records with the given manager_name
+        response = client.table(TABLE_NAME).update({"manager_tag": normalized_tag}).eq("manager_name", manager_name).execute()
+        
+        # Count updated records
+        updated_count = len(response.data) if response.data else 0
+        
+        logger.info(f"[UPDATE_TAG] Updated manager_tag for manager_name '{manager_name}' to '{normalized_tag}'. Updated {updated_count} records.")
+        
+        return updated_count
+    except Exception as e:
+        logger.error(f"Error updating manager_tag for {manager_name}: {e}", exc_info=True)
+        raise
+
+def count_records_by_manager_name(client, manager_name: str) -> int:
+    """Count records with given manager_name"""
+    try:
+        # Get all records with this manager_name and count them
+        # Using limit to avoid loading all data, but we need to count
+        response = client.table(TABLE_NAME).select("id").eq("manager_name", manager_name).execute()
+        return len(response.data) if response.data else 0
+    except Exception as e:
+        logger.error(f"Error counting records for manager_name {manager_name}: {e}", exc_info=True)
+        return 0
 
 def check_field_uniqueness(client, field_name: str, field_value: str) -> bool:
     """Check if a field value already exists in the database (with retry and cache)"""
@@ -2904,7 +3164,6 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get previous field
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        ('manager_name', ADD_MANAGER_NAME),
         ('facebook_link', ADD_FB_LINK),
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
@@ -2921,16 +3180,14 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if prev_field:
         field_label = get_field_label(prev_field)
-        is_optional = prev_field not in ['fullname', 'manager_name']
+        is_optional = prev_field not in ['fullname']
         
         # Calculate step number for previous field
         _, _, current_step, total_steps = get_next_add_field(prev_field)
         progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
         
-        # Для обязательных полей (fullname, manager_name) не показываем требования к формату
-        if prev_field == 'manager_name':
-            message = f"{progress_text}📝 Введите стейдж менеджера:\n\n ⚠️ Так менеджер записан в отчётности"
-        elif prev_field == 'fullname':
+        # Для обязательных полей (fullname) не показываем требования к формату
+        if prev_field == 'fullname':
             message = f"{progress_text}📝 Введите {field_label}:"
         else:
             requirements = get_field_format_requirements(prev_field)
@@ -2956,6 +3213,90 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
+async def tag_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle confirmation of tag update"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Get manager_name and new_tag from context
+        manager_name = context.user_data.get('tag_manager_name')
+        new_tag = context.user_data.get('tag_new_tag')
+        
+        if not manager_name or not new_tag:
+            logger.error(f"[TAG] Missing data in context: manager_name={manager_name}, new_tag={new_tag}")
+            await query.edit_message_text(
+                "❌ Ошибка: не удалось получить данные. Попробуйте снова с команды /tag",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Get Supabase client
+        client = get_supabase_client()
+        if not client:
+            error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+            await query.edit_message_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        
+        # Update manager_tag
+        updated_count = update_manager_tag_by_name(client, manager_name, new_tag)
+        
+        # Clear context
+        clear_all_conversation_state(context, update.effective_user.id)
+        
+        # Show success message
+        await query.edit_message_text(
+            f"✅ <b>Тег успешно обновлен!</b>\n\n"
+            f"<b>Менеджер:</b> {escape_html(manager_name)}\n"
+            f"<b>Новый тег:</b> <code>{escape_html(new_tag)}</code>\n"
+            f"<b>Обновлено записей:</b> {updated_count}",
+            reply_markup=get_main_menu_keyboard(),
+            parse_mode='HTML'
+        )
+        
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error in tag_confirm_callback: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                "❌ Произошла ошибка при обновлении тега. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
+async def tag_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle cancellation of tag update"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        # Clear context
+        clear_all_conversation_state(context, update.effective_user.id)
+        
+        # Show cancellation message
+        await query.edit_message_text(
+            "❌ Обновление тега отменено.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error in tag_cancel_callback: {e}", exc_info=True)
+        try:
+            await query.edit_message_text(
+                "❌ Произошла ошибка. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
 async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Validate and save the lead"""
     query = update.callback_query
@@ -2977,20 +3318,6 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['current_field'] = 'fullname'
         context.user_data['current_state'] = ADD_FULLNAME
         return ADD_FULLNAME
-    
-    if not user_data.get('manager_name'):
-        field_label = get_field_label('manager_name')
-        _, _, current_step, total_steps = get_next_add_field('fullname')
-        progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
-        await query.edit_message_text(
-            f"{progress_text}❌ <b>Ошибка:</b> {field_label} обязателен для заполнения!\n\n"
-            f"📝 Введите стейдж менеджера:\n\n ⚠️ Так менеджер записан в отчётности",
-            reply_markup=get_navigation_keyboard(is_optional=False, show_back=True),
-            parse_mode='HTML'
-        )
-        context.user_data['current_field'] = 'manager_name'
-        context.user_data['current_state'] = ADD_MANAGER_NAME
-        return ADD_MANAGER_NAME
     
     # Check if at least one identifier is present
     required_fields = ['facebook_link', 'telegram_name', 'telegram_id']
@@ -3096,6 +3423,31 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if telegram_name_value:
                 save_data['telegram_user'] = telegram_name_value
         
+        # Automatically extract manager_name and manager_tag from user who is saving
+        from_user = query.from_user
+        first_name = from_user.first_name or ""
+        last_name = from_user.last_name or ""
+        
+        # Build manager_name from first_name + last_name
+        if last_name:
+            manager_name = f"{first_name} {last_name}".strip()
+        else:
+            manager_name = first_name.strip()
+        
+        # Normalize manager_name (trim spaces, collapse multiple spaces)
+        manager_name = normalize_text_field(manager_name)
+        save_data['manager_name'] = manager_name
+        
+        # Extract manager_tag from username (without @)
+        manager_tag = ""
+        if from_user.username:
+            # Remove @ if present and normalize
+            username = from_user.username.replace('@', '').strip()
+            if username:
+                manager_tag = username
+        
+        save_data['manager_tag'] = manager_tag
+        
         logger.info(f"[ADD_SAVE] Inserting data to database: {save_data}")
         response = client.table(TABLE_NAME).insert(save_data).execute()
         
@@ -3109,6 +3461,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             field_labels = {
                 'fullname': 'Клиент (fullname)',
                 'manager_name': 'Стейдж менеджера (manager_name)',
+                'manager_tag': 'Тег менеджера (manager_tag)',
                 'facebook_link': 'Facebook Ссылка (facebook_link)',
                 'telegram_user': 'Имя пользователя Telegram (telegram_user)',
                 'telegram_id': 'Telegram ID (telegram_id)',
@@ -3130,7 +3483,6 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message_parts = ["✅ <b>Клиент успешно добавлен!</b>\n"]
             field_labels = {
                 'fullname': 'Имя Фамилия',
-                'manager_name': 'Агент',
                 'facebook_link': 'Facebook Ссылка',
                 'telegram_name': 'Имя пользователя Telegram',
                 'telegram_id': 'Telegram ID'
@@ -4105,6 +4457,7 @@ def create_telegram_app():
     # Add command handlers
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("q", quit_command))
+    telegram_app.add_handler(CommandHandler("tag", tag_command))
     # Note: /q command has high priority and will work from any state
     
     # Smart check conversation handler (register FIRST to have priority)
@@ -4199,13 +4552,6 @@ def create_telegram_app():
         entry_points=[CallbackQueryHandler(add_new_callback, pattern="^add_new$")],
         states={
             ADD_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_MANAGER_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -4317,6 +4663,31 @@ def create_telegram_app():
         per_message=False,
     )
     telegram_app.add_handler(edit_conv)
+    
+    # Tag conversation handler - for changing manager_tag
+    tag_conv = ConversationHandler(
+        entry_points=[CommandHandler("tag", tag_command)],
+        states={
+            TAG_SELECT_MANAGER: [
+                CallbackQueryHandler(tag_manager_callback, pattern="^tag_manager_"),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+            TAG_ENTER_NEW: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, tag_enter_new),
+                CallbackQueryHandler(tag_confirm_callback, pattern="^tag_confirm$"),
+                CallbackQueryHandler(tag_cancel_callback, pattern="^tag_cancel$"),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("q", quit_command),
+            CommandHandler("start", start_command),
+        ],
+        per_message=False,
+    )
+    telegram_app.add_handler(tag_conv)
     
     # Add callback query handler for menu navigation buttons
     # Registered AFTER ConversationHandlers so they have priority
