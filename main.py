@@ -521,7 +521,6 @@ def get_field_format_requirements(field_name: str) -> str:
     requirements = {
         'fullname': (
             "📋 <b>Требования к формату:</b>\n"
-            "• Поле <b>обязательное</b> для заполнения\n"
             "• Введите имя и фамилию клиента\n"
             "• Можно использовать любые буквы (русские, латинские)\n"
             "• Пробелы между словами разрешены\n\n"
@@ -532,7 +531,6 @@ def get_field_format_requirements(field_name: str) -> str:
         ),
         'manager_name': (
             "📋 <b>Требования к формату:</b>\n"
-            "• Поле <b>обязательное</b> для заполнения\n"
             "• Введите стейдж менеджера (так менеджер записан в отчётности)\n"
             "• Можно использовать любые буквы (русские, латинские)\n"
             "• Пробелы между словами разрешены\n\n"
@@ -548,21 +546,14 @@ def get_field_format_requirements(field_name: str) -> str:
             "<code>facebook.com/username</code>\n"
             "<code>https://www.facebook.com/profile.php?id=123456789012345</code>\n"
             "<code>https://m.facebook.com/username</code>\n\n"
-            "⚠️ Ссылка должна начинаться с http:// или https://\n\n"
             "‼️ Важно: добавляйте только прямую ссылку на профиль (без фото, информации и прочих вкладок).\n\n"
-            "Пример: <code>facebook.com/username</code> ✅\n"
-            "А не ссылки с лишними символами ❌"
         ),
         'telegram_name': (
             "📋 <b>Требования к формату:</b>\n"
-            "• Поле <b>опциональное</b> (можно пропустить)\n"
-            "• Введите username без символа @\n"
-            "• Можно использовать буквы, цифры, подчёркивания\n"
             "• Пробелы не допускаются\n\n"
             "💡 <b>Примеры:</b>\n"
             "<code>username</code>\n"
             "<code>Ivan_123</code>\n"
-            "<code>user123</code>\n"
             "<code>john_doe</code>\n\n"
             "⚠️ <b>Важно:</b> Не указывайте символ @ в начале"
         ),
@@ -827,12 +818,25 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     If user already has add state (set by handle_forwarded_message or add_field_input),
     we immediately delegate this *same* update to the proper handler so the user
     doesn't have to send the message twice.
+    
+    IMPORTANT: This should NOT intercept messages if user is in another active ConversationHandler
+    (e.g., tag_conv, edit_conv, etc.)
     """
     if not update.message:
         return None
     
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
+    
+    # Check if user is in another active ConversationHandler
+    # Tag flow states
+    tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
+    if current_state in tag_states:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow (state={current_state}), "
+            "not intercepting message"
+        )
+        return None
     
     # Conversation states that belong to the add flow
     add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
@@ -1086,9 +1090,14 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return ConversationHandler.END
         
-        # Clear conversation state
+        # Clear conversation state AND user_data_store to prevent interference from add flow
         clear_all_conversation_state(context, user_id)
-        logger.info(f"[TAG] State cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
+        # Also clear user_data_store to prevent check_add_state_entry from intercepting messages
+        if user_id in user_data_store:
+            del user_data_store[user_id]
+        if user_id in user_data_store_access_time:
+            del user_data_store_access_time[user_id]
+        logger.info(f"[TAG] State and user_data_store cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
         
         # Get Supabase client
         client = get_supabase_client()
@@ -1180,6 +1189,12 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 reply_markup=get_main_menu_keyboard()
             )
             return ConversationHandler.END
+        
+        # Clear user_data_store to prevent check_add_state_entry from intercepting messages
+        if user_id in user_data_store:
+            del user_data_store[user_id]
+        if user_id in user_data_store_access_time:
+            del user_data_store_access_time[user_id]
         
         # Extract index from callback_data
         # Format: "tag_mgr_{index}"
