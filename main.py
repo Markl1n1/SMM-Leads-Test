@@ -190,11 +190,41 @@ def normalize_telegram_id(tg_id: str) -> str:
     return ''.join(filter(str.isdigit, tg_id))
 
 def normalize_tag(tag: str) -> str:
-    """Normalize tag: remove @ symbol, trim spaces"""
+    """Normalize tag: handle three formats and return format 3 (username without @ and without https://t.me/)
+    
+    Accepts:
+    1. Full URL: https://t.me/marklindt -> marklindt
+    2. With @: @marklindt -> marklindt
+    3. Without @: marklindt -> marklindt
+    
+    Returns: username without @ and without https://t.me/ prefix
+    """
     if not tag:
         return ""
-    # Remove @ if present and trim
-    normalized = tag.replace('@', '').strip()
+    
+    # Trim spaces
+    normalized = tag.strip()
+    
+    # Handle full Telegram URL format: https://t.me/username
+    if normalized.startswith('https://t.me/'):
+        # Extract username after https://t.me/
+        normalized = normalized.replace('https://t.me/', '').strip()
+    elif normalized.startswith('http://t.me/'):
+        # Handle http:// variant
+        normalized = normalized.replace('http://t.me/', '').strip()
+    elif normalized.startswith('t.me/'):
+        # Handle t.me/ variant
+        normalized = normalized.replace('t.me/', '').strip()
+    
+    # Remove @ symbol if present
+    normalized = normalized.replace('@', '').strip()
+    
+    # Remove any trailing slashes or query parameters
+    if '/' in normalized:
+        normalized = normalized.split('/')[0]
+    if '?' in normalized:
+        normalized = normalized.split('?')[0]
+    
     return normalized
 
 def normalize_text_field(text: str) -> str:
