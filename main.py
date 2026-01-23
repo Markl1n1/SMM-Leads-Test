@@ -882,6 +882,45 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     # No pre-initialized add state – let other handlers process update
     return None
 
+async def check_add_state_entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for add flow via callback query when state was initialized by forwarded message.
+    
+    This allows callback queries (like add_skip, add_back) to work even when
+    the ConversationHandler wasn't explicitly activated via add_new button.
+    """
+    if not update.callback_query:
+        return None
+    
+    user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    # Check for indicators of other active flows BEFORE checking add flow
+    tag_manager_name = context.user_data.get('tag_manager_name')
+    tag_new_tag = context.user_data.get('tag_new_tag')
+    editing_lead_id = context.user_data.get('editing_lead_id')
+    
+    if tag_manager_name or tag_new_tag or editing_lead_id:
+        # User is in tag/edit flow, don't activate add flow
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} is in tag/edit flow, "
+            "not activating add flow"
+        )
+        return None
+    
+    # Conversation states that belong to the add flow
+    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    
+    # If user has add state, activate ConversationHandler by returning the state
+    if user_id in user_data_store and current_state in add_states:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} has existing add state {current_state}, "
+            "activating ConversationHandler"
+        )
+        return current_state
+    
+    # No pre-initialized add state – let other handlers process callback
+    return None
+
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarded messages globally - extract data and start add flow if needed"""
     if not update.message:
@@ -5243,7 +5282,10 @@ def create_telegram_app():
         entry_points=[
             CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
             # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
-            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
+            # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
+            # This handles callbacks like add_skip, add_back when flow was started via forwarded message
+            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel)$")
         ],
         states={
             ADD_FULLNAME: [
