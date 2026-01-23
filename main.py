@@ -39,7 +39,7 @@ import asyncio
 import uuid
 from functools import wraps
 from flask import Flask, request, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from telegram.error import TimedOut, NetworkError, RetryAfter
 from telegram.request import HTTPXRequest
@@ -703,6 +703,19 @@ def build_lead_photo_path(lead_id: int, extension: str = "jpg") -> str:
     unique = uuid.uuid4().hex[:8]
     return f"photos/lead_{lead_id}_{unique}.{extension}"
 
+async def download_photo_from_url(url: str) -> bytes | None:
+    """Download photo from URL and return as bytes"""
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            logger.info(f"[PHOTO] Successfully downloaded photo from URL: {url[:50]}... ({len(response.content)} bytes)")
+            return response.content
+    except Exception as e:
+        logger.error(f"[PHOTO] Error downloading photo from URL {url}: {e}", exc_info=True)
+        return None
+
 async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str | None:
     """
     Download photo from Telegram and upload to Supabase Storage.
@@ -833,10 +846,12 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     # Check for tag flow indicators (even if current_state is not set correctly)
     tag_manager_name = context.user_data.get('tag_manager_name')
     tag_new_tag = context.user_data.get('tag_new_tag')
-    if tag_manager_name or tag_new_tag:
+    pin_attempts = context.user_data.get('pin_attempts')
+    # If user has pin_attempts, they're likely in tag flow (PIN input stage)
+    if tag_manager_name or tag_new_tag or pin_attempts is not None:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow "
-            f"(tag_manager_name={bool(tag_manager_name)}, tag_new_tag={bool(tag_new_tag)}), "
+            f"(tag_manager_name={bool(tag_manager_name)}, tag_new_tag={bool(tag_new_tag)}, pin_attempts={pin_attempts}), "
             "not intercepting message"
         )
         return None
@@ -851,8 +866,8 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
         return None
     
     # Check if user is in another active ConversationHandler by state
-    # Tag flow states
-    tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
+    # Tag flow states - INCLUDING TAG_PIN to prevent intercepting PIN input!
+    tag_states = {TAG_PIN, TAG_SELECT_MANAGER, TAG_ENTER_NEW}
     if current_state in tag_states:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow (state={current_state}), "
@@ -1391,12 +1406,14 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Reset PIN attempt counter when starting new tag flow
         context.user_data['pin_attempts'] = 0
+        # Explicitly set current_state to TAG_PIN to prevent check_add_state_entry from intercepting
+        context.user_data['current_state'] = TAG_PIN
         
         # Request PIN code before allowing tag change
         message = "🔒 Для изменения тега менеджера требуется PIN-код.\n\nВведите PIN-код:"
         await update.message.reply_text(message)
         
-        logger.info(f"[TAG] Requested PIN code from user {user_id}, expecting TAG_PIN")
+        logger.info(f"[TAG] Requested PIN code from user {user_id}, expecting TAG_PIN, current_state set to TAG_PIN")
         return TAG_PIN
     except Exception as e:
         logger.error(f"[TAG] Error in tag_command: {e}", exc_info=True)
@@ -1495,7 +1512,10 @@ async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         
-        logger.info(f"[TAG] Sent manager selection keyboard to user {user_id}, expecting TAG_SELECT_MANAGER")
+        # Explicitly set current_state to TAG_SELECT_MANAGER to prevent other handlers from intercepting
+        context.user_data['current_state'] = TAG_SELECT_MANAGER
+        
+        logger.info(f"[TAG] Sent manager selection keyboard to user {user_id}, expecting TAG_SELECT_MANAGER, current_state set to TAG_SELECT_MANAGER")
         return TAG_SELECT_MANAGER
     else:
         # PIN is incorrect, increment attempt counter
@@ -2456,12 +2476,32 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         
         # Send message with photo if available (only for single result)
         if len(all_results) == 1 and photo_url:
-            sent_message = await update.message.reply_photo(
-                photo=photo_url,
-                caption=message,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
+            try:
+                # Try to download and send as file
+                photo_bytes = await download_photo_from_url(photo_url)
+                if photo_bytes:
+                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    sent_message = await update.message.reply_photo(
+                        photo=photo_file,
+                        caption=message,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                else:
+                    # If download fails, send text with link
+                    sent_message = await update.message.reply_text(
+                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"[MULTIPLE FIELDS SEARCH] Error sending photo: {e}", exc_info=True)
+                # Fallback: send text with link
+                sent_message = await update.message.reply_text(
+                    message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
         else:
             sent_message = await update.message.reply_text(
                 message,
@@ -2708,12 +2748,32 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
         
         # Send message with photo if available (only for single result)
         if len(results) == 1 and photo_url:
-            sent_message = await update.message.reply_photo(
-                photo=photo_url,
-                caption=message,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
+            try:
+                # Try to download and send as file
+                photo_bytes = await download_photo_from_url(photo_url)
+                if photo_bytes:
+                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    sent_message = await update.message.reply_photo(
+                        photo=photo_file,
+                        caption=message,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                else:
+                    # If download fails, send text with link
+                    sent_message = await update.message.reply_text(
+                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"[FIELD SEARCH] Error sending photo: {e}", exc_info=True)
+                # Fallback: send text with link
+                sent_message = await update.message.reply_text(
+                    message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
         else:
             sent_message = await update.message.reply_text(
                 message,
@@ -2946,12 +3006,32 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send message with photo if available (only for single result)
         if len(results) == 1 and photo_url:
-            await update.message.reply_photo(
-                photo=photo_url,
-                caption=message,
-                reply_markup=reply_markup,
-                parse_mode='HTML'
-            )
+            try:
+                # Try to download and send as file
+                photo_bytes = await download_photo_from_url(photo_url)
+                if photo_bytes:
+                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    await update.message.reply_photo(
+                        photo=photo_file,
+                        caption=message,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                else:
+                    # If download fails, send text with link
+                    await update.message.reply_text(
+                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+            except Exception as e:
+                logger.error(f"[FULLNAME SEARCH] Error sending photo: {e}", exc_info=True)
+                # Fallback: send text with link
+                await update.message.reply_text(
+                    message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
         else:
             await update.message.reply_text(
                 message,
