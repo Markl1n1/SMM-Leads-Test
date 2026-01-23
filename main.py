@@ -1779,8 +1779,13 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     user_id = query.from_user.id
     logger.info(f"[SMART_CHECK] Starting smart check for user {user_id}")
     
-    # Clear all conversation state to ensure ConversationHandler ends
+    # ALWAYS clear all conversation state to ensure clean start
     clear_all_conversation_state(context, user_id)
+    # Also clear any stale ConversationHandler internal keys
+    if context.user_data:
+        keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
+        for key in keys_to_remove:
+            del context.user_data[key]
     
     # Clean up old check messages
     await cleanup_check_messages(update, context)
@@ -1935,8 +1940,26 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         callback_data = query.data if query.data else ""
         user_id = query.from_user.id if query.from_user else None
         
+        # Special handling for check_menu - try to activate ConversationHandler
+        if callback_data == "check_menu":
+            logger.info(f"[UNKNOWN_CALLBACK] check_menu callback not handled by ConversationHandler, trying to activate for user {user_id}")
+            # Clear stale state and let ConversationHandler handle it
+            if user_id:
+                clear_all_conversation_state(context, user_id)
+                # Also clear any stale ConversationHandler internal keys
+                if context.user_data:
+                    keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
+                    for key in keys_to_remove:
+                        del context.user_data[key]
+            # Answer callback and let ConversationHandler process it
+            try:
+                await retry_telegram_api(query.answer)
+            except:
+                pass
+            # Return None to let ConversationHandler process it
+            return None
+        
         # Check if we're in a stale ConversationHandler state
-        # If so, clear state and don't show error (might be from previous conversation)
         if context.user_data:
             has_conversation_keys = any(key.startswith('_conversation_') for key in context.user_data.keys())
             if has_conversation_keys:
@@ -1957,12 +1980,21 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         try:
             await retry_telegram_api(query.answer, text="⚠️ Неизвестная команда. Используйте меню.", show_alert=True)
             if query.message:
-                await retry_telegram_api(
-                    query.edit_message_text,
-                    text="❌ Неизвестная команда.\n\n"
-                    "Используйте кнопки меню для навигации.",
-                    reply_markup=get_main_menu_keyboard()
-                )
+                # Check if message already shows main menu to avoid "Message is not modified" error
+                message_text = query.message.text or ""
+                has_main_menu_buttons = "Проверить" in message_text or "Добавить" in message_text
+                
+                # Only edit if message doesn't already show main menu
+                if not has_main_menu_buttons:
+                    await retry_telegram_api(
+                        query.edit_message_text,
+                        text="❌ Неизвестная команда.\n\n"
+                        "Используйте кнопки меню для навигации.",
+                        reply_markup=get_main_menu_keyboard()
+                    )
+                else:
+                    # Message already shows main menu, just answer callback
+                    logger.info(f"[UNKNOWN_CALLBACK] Message already shows main menu, skipping edit for callback '{callback_data}'")
         except Exception as e:
             logger.error(f"Error in unknown_callback_handler: {e}", exc_info=True)
     return ConversationHandler.END
