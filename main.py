@@ -5825,10 +5825,10 @@ def create_telegram_app():
         per_message=False,
     )
     
-    # Register ConversationHandlers FIRST (before button_callback) to have priority
+    # Register ConversationHandlers FIRST (before button_callback) to have priority.
+    # IMPORTANT: Order matters. `tag_conv` must be registered BEFORE `add_conv`,
+    # otherwise `add_conv` entry_point `check_add_state_entry` can intercept PIN input.
     telegram_app.add_handler(smart_check_conv)  # Smart check with auto-detection
-    # Old check handlers are no longer registered (commented out above)
-    telegram_app.add_handler(add_conv)
     
     # Edit conversation handler - register with other ConversationHandlers for priority
     edit_conv = ConversationHandler(
@@ -5926,6 +5926,10 @@ def create_telegram_app():
         per_message=False,
     )
     telegram_app.add_handler(tag_conv)
+
+    # Old check handlers are no longer registered (commented out above)
+    # Register AFTER tag_conv so /tag PIN flow has priority over add flow entry points.
+    telegram_app.add_handler(add_conv)
     
     # Add callback query handler for menu navigation buttons
     # Registered AFTER ConversationHandlers so they have priority
