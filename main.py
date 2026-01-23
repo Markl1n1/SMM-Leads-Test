@@ -893,6 +893,7 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
     
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
+    callback_data = update.callback_query.data if update.callback_query.data else ""
     
     # Check for indicators of other active flows BEFORE checking add flow
     tag_manager_name = context.user_data.get('tag_manager_name')
@@ -910,12 +911,28 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
     # Conversation states that belong to the add flow
     add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
     
-    # If user has add state, activate ConversationHandler by returning the state
+    # If user has add state, activate ConversationHandler AND process the callback
     if user_id in user_data_store and current_state in add_states:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} has existing add state {current_state}, "
-            "activating ConversationHandler"
+            f"activating ConversationHandler and processing callback: {callback_data}"
         )
+        
+        # Process the callback immediately based on its type
+        if callback_data == "add_skip":
+            # Delegate to add_skip_callback, which will return the next state
+            result = await add_skip_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_back":
+            # Delegate to add_back_callback
+            result = await add_back_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_cancel":
+            # Delegate to add_cancel_callback
+            result = await add_cancel_callback(update, context)
+            return result if result is not None else current_state
+        
+        # If callback doesn't match, just activate ConversationHandler
         return current_state
     
     # No pre-initialized add state – let other handlers process callback
@@ -3534,7 +3551,7 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Add edit fullname button if fullname exists
     if user_data.get('fullname'):
-        keyboard.append([InlineKeyboardButton("✏️ Редактировать имя", callback_data="edit_fullname_from_review")])
+        keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data="edit_fullname_from_review")])
     
     keyboard.extend([
         [InlineKeyboardButton("◀️ Назад", callback_data="add_back")],
@@ -4056,6 +4073,11 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Prepare data for saving - map telegram_name to telegram_user for database compatibility
         save_data = user_data.copy()
+        
+        # Remove photo_file_id - it's a temporary value used only for uploading to Supabase Storage
+        # The photo_url will be set later after successful upload
+        if 'photo_file_id' in save_data:
+            save_data.pop('photo_file_id')
         
         # Map telegram_name to telegram_user for database (backward compatibility)
         if 'telegram_name' in save_data:
