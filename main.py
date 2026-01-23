@@ -59,9 +59,6 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 TABLE_NAME = os.environ.get('TABLE_NAME', 'facebook_leads')  # Default table name
 PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 
-# Allowed manager names for /tag command (comma-separated list)
-ALLOWED_TAG_MANAGERS = [name.strip() for name in os.environ.get('ALLOWED_TAG_MANAGERS', '').split(',') if name.strip()] if os.environ.get('ALLOWED_TAG_MANAGERS') else []
-
 # Photo upload configuration
 SUPABASE_LEADS_BUCKET = os.environ.get('SUPABASE_LEADS_BUCKET', 'Leads')  # Supabase Storage bucket name
 ENABLE_LEAD_PHOTOS = os.environ.get('ENABLE_LEAD_PHOTOS', 'true').lower() == 'true'  # Enable/disable photo uploads
@@ -172,28 +169,6 @@ def normalize_tag(tag: str) -> str:
     # Remove @ if present and trim
     normalized = tag.replace('@', '').strip()
     return normalized
-
-def is_user_allowed_to_change_tags(update: Update) -> bool:
-    """Check if user is allowed to change tags based on manager_name"""
-    if not ALLOWED_TAG_MANAGERS:
-        # If no list is configured, deny access by default
-        return False
-    
-    from_user = update.effective_user
-    first_name = from_user.first_name or ""
-    last_name = from_user.last_name or ""
-    
-    # Build manager_name same way as in add_save_callback
-    if last_name:
-        manager_name = f"{first_name} {last_name}".strip()
-    else:
-        manager_name = first_name.strip()
-    
-    # Normalize manager_name (trim spaces, collapse multiple spaces)
-    manager_name = normalize_text_field(manager_name)
-    
-    # Check if this manager_name is in allowed list
-    return manager_name in ALLOWED_TAG_MANAGERS
 
 def normalize_text_field(text: str) -> str:
     """Normalize text field (fullname, manager_name): trim spaces, collapse multiple spaces, limit length"""
@@ -648,9 +623,10 @@ def get_navigation_keyboard(is_optional: bool = False, show_back: bool = True) -
     EDIT_MANAGER_NAME,
     EDIT_PIN,
     # Tag states
+    TAG_PIN,  # PIN verification for tag command
     TAG_SELECT_MANAGER,  # Selection of manager from list
     TAG_ENTER_NEW  # Enter new tag
-) = range(20)
+) = range(21)
 
 # Store user data during conversation - isolated per user_id for concurrent access
 # Each user's data is stored separately, allowing 10+ managers to work simultaneously
@@ -1203,6 +1179,116 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             # The state is already set in context.user_data, so ConversationHandler will process it
             return None
 
+async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle regular (not forwarded) photo messages - start add lead flow"""
+    if not update.message:
+        return None
+    
+    user_id = update.effective_user.id
+    
+    # Check if message is forwarded - if yes, let handle_forwarded_message handle it
+    is_forwarded = (update.message.forward_from is not None or 
+                    update.message.forward_from_chat is not None or 
+                    update.message.forward_sender_name is not None)
+    if is_forwarded:
+        return None  # Let handle_forwarded_message handle forwarded messages
+    
+    # Check if message has photo
+    if not update.message.photo:
+        return None
+    
+    # Check if user is in another active ConversationHandler
+    current_state = context.user_data.get('current_state')
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
+    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    
+    # Check if user is in edit flow
+    if current_state in edit_states or context.user_data.get('editing_lead_id'):
+        logger.info(f"[PHOTO_MESSAGE] User {user_id} is in edit flow, ignoring photo message")
+        return None
+    
+    # Check if user is in tag flow
+    if current_state in tag_states:
+        logger.info(f"[PHOTO_MESSAGE] User {user_id} is in tag flow, ignoring photo message")
+        return None
+    
+    # Check if user is already in add flow
+    if user_id in user_data_store and current_state in add_states:
+        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow, ignoring photo message")
+        return None
+    
+    # Extract photo
+    largest_photo = update.message.photo[-1]
+    photo_file_id = largest_photo.file_id
+    
+    # Check if message has text or caption
+    has_text = bool(update.message.text and update.message.text.strip())
+    has_caption = bool(update.message.caption and update.message.caption.strip())
+    
+    # Initialize add flow
+    clear_all_conversation_state(context, user_id)
+    user_data_store[user_id] = {}
+    user_data_store_access_time[user_id] = time.time()
+    user_data_store[user_id]['photo_file_id'] = photo_file_id
+    
+    if has_text or has_caption:
+        # Сценарий 2: Фото с текстом - использовать текст как fullname, начать с шага 2
+        text = (update.message.text or update.message.caption).strip()
+        normalized_fullname = normalize_text_field(text)
+        if normalized_fullname:
+            user_data_store[user_id]['fullname'] = normalized_fullname
+            context.user_data['current_field'] = 'facebook_link'
+            context.user_data['current_state'] = ADD_FB_LINK
+            context.user_data['add_step'] = 1
+            
+            field_label = get_field_label('facebook_link')
+            _, _, current_step, total_steps = get_next_add_field('fullname')
+            requirements = get_field_format_requirements('facebook_link')
+            
+            await update.message.reply_text(
+                f"✅ Фото получено. Имя извлечено из текста: <code>{escape_html(normalized_fullname)}</code>\n\n"
+                f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+                f"📝 Введите {field_label}:\n\n{requirements}",
+                reply_markup=get_navigation_keyboard(is_optional=True, show_back=False),
+                parse_mode='HTML'
+            )
+        else:
+            # Если текст не удалось нормализовать, начать с шага 1
+            context.user_data['current_field'] = 'fullname'
+            context.user_data['current_state'] = ADD_FULLNAME
+            context.user_data['add_step'] = 0
+            
+            field_label = get_field_label('fullname')
+            _, _, current_step, total_steps = get_next_add_field('')
+            
+            await update.message.reply_text(
+                f"✅ Фото получено.\n\n"
+                f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+                f"📝 Введите {field_label}:",
+                reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
+                parse_mode='HTML'
+            )
+    else:
+        # Сценарий 1: Фото без текста - начать с шага 1
+        context.user_data['current_field'] = 'fullname'
+        context.user_data['current_state'] = ADD_FULLNAME
+        context.user_data['add_step'] = 0
+        
+        field_label = get_field_label('fullname')
+        _, _, current_step, total_steps = get_next_add_field('')
+        
+        await update.message.reply_text(
+            f"✅ Фото получено.\n\n"
+            f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+            f"📝 Введите {field_label}:",
+            reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
+            parse_mode='HTML'
+        )
+    
+    logger.info(f"[PHOTO_MESSAGE] Started add flow for user {user_id} with photo (scenario: {'with text' if (has_text or has_caption) else 'without text'})")
+    return None
+
 # Command handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show main menu"""
@@ -1239,7 +1325,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /tag command - show list of manager_name to change tag"""
+    """Handle /tag command - request PIN code before showing manager list"""
     try:
         user_id = update.effective_user.id
         from_user = update.effective_user
@@ -1249,16 +1335,6 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"username='{from_user.username}', "
             f"context_keys_before_clear={list(context.user_data.keys()) if context.user_data else []}"
         )
-        logger.info(f"[TAG] ALLOWED_TAG_MANAGERS={ALLOWED_TAG_MANAGERS}")
-        
-        # Check access
-        if not is_user_allowed_to_change_tags(update):
-            logger.warning(f"[TAG] Access denied for user {user_id}")
-            await update.message.reply_text(
-                "❌ Доступ запрещён",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return ConversationHandler.END
         
         # Clear conversation state AND user_data_store to prevent interference from add flow
         clear_all_conversation_state(context, user_id)
@@ -1275,6 +1351,57 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'add_step' in context.user_data:
             del context.user_data['add_step']
         logger.info(f"[TAG] State and user_data_store cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
+        
+        # Reset PIN attempt counter when starting new tag flow
+        context.user_data['pin_attempts'] = 0
+        
+        # Request PIN code before allowing tag change
+        message = "🔒 Для изменения тега менеджера требуется PIN-код.\n\nВведите PIN-код:"
+        await update.message.reply_text(message)
+        
+        logger.info(f"[TAG] Requested PIN code from user {user_id}, expecting TAG_PIN")
+        return TAG_PIN
+    except Exception as e:
+        logger.error(f"[TAG] Error in tag_command: {e}", exc_info=True)
+        try:
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке команды. Попробуйте позже.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except:
+            pass
+        return ConversationHandler.END
+
+async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle PIN code input for tag command"""
+    user_id = update.effective_user.id
+    
+    # Check if message exists and has text
+    if not update.message or not update.message.text:
+        if update.message:
+            await update.message.reply_text(
+                "❌ Ошибка: Неверный формат сообщения. Пожалуйста, введите PIN-код текстом."
+            )
+        else:
+            logger.error("tag_pin_input: update.message is None")
+        return TAG_PIN
+    
+    text = update.message.text.strip()
+    
+    # PIN code is "2025"
+    PIN_CODE = "2025"
+    
+    if text == PIN_CODE:
+        # PIN is correct, reset attempt counter
+        if 'pin_attempts' in context.user_data:
+            del context.user_data['pin_attempts']
+        
+        # PIN is correct, load manager names and show selection
+        # Clear any old field editing state to prevent automatic transitions
+        if 'current_field' in context.user_data:
+            del context.user_data['current_field']
+        if 'current_state' in context.user_data:
+            del context.user_data['current_state']
         
         # Get Supabase client
         client = get_supabase_client()
@@ -1333,16 +1460,28 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"[TAG] Sent manager selection keyboard to user {user_id}, expecting TAG_SELECT_MANAGER")
         return TAG_SELECT_MANAGER
-    except Exception as e:
-        logger.error(f"[TAG] Error in tag_command: {e}", exc_info=True)
-        try:
+    else:
+        # PIN is incorrect, increment attempt counter
+        pin_attempts = context.user_data.get('pin_attempts', 0) + 1
+        context.user_data['pin_attempts'] = pin_attempts
+        
+        if pin_attempts >= 3:
+            # Too many failed attempts, return to main menu
             await update.message.reply_text(
-                "❌ Произошла ошибка при обработке команды. Попробуйте позже.",
+                "❌ Превышено количество попыток ввода PIN-кода (3). Доступ к изменению тега заблокирован.",
                 reply_markup=get_main_menu_keyboard()
             )
-        except:
-            pass
-        return ConversationHandler.END
+            # Clear tag state
+            if 'pin_attempts' in context.user_data:
+                del context.user_data['pin_attempts']
+            return ConversationHandler.END
+        else:
+            # PIN is incorrect, ask again
+            remaining_attempts = 3 - pin_attempts
+            await update.message.reply_text(
+                f"❌ Неверный PIN-код. Осталось попыток: {remaining_attempts}\n\nВведите PIN-код:"
+            )
+            return TAG_PIN
 
 async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle selection of manager from tag command"""
@@ -1357,15 +1496,6 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             f"callback_data={callback_data}, "
             f"context_keys={list(context.user_data.keys()) if context.user_data else []}"
         )
-        
-        # Check access
-        if not is_user_allowed_to_change_tags(update):
-            logger.warning(f"[TAG] Access denied for user {user_id} in callback")
-            await query.edit_message_text(
-                "❌ Доступ запрещён",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return ConversationHandler.END
         
         # Clear user_data_store to prevent check_add_state_entry from intercepting messages
         if user_id in user_data_store:
@@ -5212,6 +5342,14 @@ def create_telegram_app():
     )
     telegram_app.add_handler(forwarded_message_handler)
     
+    # Global handler for regular photo messages (register AFTER forwarded messages handler)
+    # This handles regular (not forwarded) photo messages to start add lead flow
+    photo_message_handler = MessageHandler(
+        filters.PHOTO & ~filters.FORWARDED,
+        handle_photo_message
+    )
+    telegram_app.add_handler(photo_message_handler)
+    
     # Smart check conversation handler (register FIRST to have priority)
     smart_check_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(check_menu_callback, pattern="^check_menu$")],
@@ -5430,6 +5568,11 @@ def create_telegram_app():
             CallbackQueryHandler(tag_manager_callback, pattern="^tag_mgr_\\d+$")
         ],
         states={
+            TAG_PIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, tag_pin_input),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
             TAG_SELECT_MANAGER: [
                 CallbackQueryHandler(tag_manager_callback, pattern="^tag_mgr_\\d+$"),
                 CommandHandler("q", quit_command),
