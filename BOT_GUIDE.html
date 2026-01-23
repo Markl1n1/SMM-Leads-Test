@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ClientsBot - Руководство пользователя</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 20px;
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        
+        h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            font-size: 28px;
+        }
+        
+        h2 {
+            color: #34495e;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 22px;
+            border-left: 4px solid #3498db;
+            padding-left: 15px;
+        }
+        
+        h3 {
+            color: #555;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 18px;
+        }
+        
+        p {
+            margin-bottom: 10px;
+        }
+        
+        ul, ol {
+            margin-left: 20px;
+            margin-bottom: 15px;
+        }
+        
+        li {
+            margin-bottom: 8px;
+        }
+        
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            color: #e74c3c;
+        }
+        
+        .divider {
+            height: 2px;
+            background: linear-gradient(to right, #3498db, transparent);
+            margin: 30px 0;
+        }
+        
+        .tip {
+            background: #e8f5e9;
+            border-left: 4px solid #4caf50;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        
+        .tip::before {
+            content: "💡 ";
+            font-weight: bold;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            border-left: 4px solid #ffc107;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 4px;
+        }
+        
+        .warning::before {
+            content: "⚠️ ";
+            font-weight: bold;
+        }
+        
+        .step {
+            background: #f8f9fa;
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+            border-left: 4px solid #3498db;
+        }
+        
+        .step-number {
+            font-weight: bold;
+            color: #3498db;
+            font-size: 1.1em;
+        }
+        
+        .required {
+            color: #e74c3c;
+            font-weight: bold;
+        }
+        
+        .optional {
+            color: #95a5a6;
+        }
+        
+        strong {
+            color: #2c3e50;
+        }
+        
+        @media (max-width: 600px) {
+            body {
+                padding: 10px;
+            }
+            
+            .container {
+                padding: 20px;
+            }
+            
+            h1 {
+                font-size: 24px;
+            }
+            
+            h2 {
+                font-size: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Начало работы</h1>
+        
+        <ol>
+            <li>Найдите бота в Telegram</li>
+            <li>Отправьте команду <code>/start</code></li>
+            <li>Вы увидите главное меню с двумя кнопками:
+                <ul>
+                    <li><strong>✅ Проверить</strong> - найти лид в базе</li>
+                    <li><strong>➕ Добавить</strong> - добавить новый лид</li>
+                </ul>
+            </li>
+        </ol>
+        
+        <div class="divider"></div>
+        
+        <h2>✅ Проверка лида</h2>
+        
+        <ol>
+            <li>Нажмите <strong>"✅ Проверить"</strong> в главном меню</li>
+            <li>Выберите способ поиска:
+                <ul>
+                    <li>📱 <strong>Имя пользователя Telegram</strong> - введите username без @</li>
+                    <li>🔗 <strong>Facebook Ссылка</strong> - вставьте ссылку на профиль</li>
+                    <li>🆔 <strong>Telegram ID</strong> - введите числовой ID (только цифры)</li>
+                    <li>👤 <strong>Клиент</strong> - введите имя или фамилию (минимум 3 символа)</li>
+                </ul>
+            </li>
+        </ol>
+        
+        <h3>Результаты поиска</h3>
+        <ul>
+            <li><strong>Если лид найден:</strong> отобразится информация о клиенте
+                <ul>
+                    <li>Если у лида есть фото, оно отобразится как ссылка "🔗 Открыть фото"</li>
+                </ul>
+            </li>
+            <li><strong>Если лид не найден:</strong> появится сообщение "❌ Клиент не найден"</li>
+        </ul>
+        
+        <div class="tip">Можно вводить часть данных - бот найдет все совпадения.</div>
+        
+        <div class="divider"></div>
+        
+        <h2>📤 Добавление лида через пересылку сообщения</h2>
+        
+        <p>Самый быстрый способ добавить лид - переслать сообщение от клиента боту.</p>
+        
+        <ol>
+            <li>Перешлите сообщение от клиента боту</li>
+            <li>Бот автоматически извлечет данные:
+                <ul>
+                    <li>Telegram ID</li>
+                    <li>Username (если доступен)</li>
+                    <li>Имя и фамилию</li>
+                    <li>Фото (если есть в сообщении)</li>
+                    <li>Facebook ссылку (если она есть в тексте сообщения)</li>
+                </ul>
+            </li>
+            <li>Продолжите заполнение недостающих полей</li>
+        </ol>
+        
+        <div class="tip">Если у клиента включены настройки приватности, некоторые данные могут быть недоступны. В этом случае заполните их вручную.</div>
+        
+        <div class="divider"></div>
+        
+        <h2>📷 Добавление лида через отправку фото</h2>
+        
+        <p>Вы можете начать добавление лида, просто отправив фото боту.</p>
+        
+        <div class="step">
+            <div class="step-number">Сценарий 1: Фото без текста</div>
+            <ul>
+                <li>Отправьте фото боту</li>
+                <li>Начнется процесс добавления с шага 1 (Имя клиента)</li>
+                <li>Фото автоматически сохранится при добавлении лида</li>
+            </ul>
+        </div>
+        
+        <div class="step">
+            <div class="step-number">Сценарий 2: Фото с текстом или подписью</div>
+            <ul>
+                <li>Отправьте фото с текстом или подписью</li>
+                <li>Текст/подпись будет использован как имя клиента</li>
+                <li>Начнется процесс добавления с шага 2 (Facebook ссылка)</li>
+                <li>Фото автоматически сохранится при добавлении лида</li>
+            </ul>
+        </div>
+        
+        <div class="tip">Можно отправить фото как вставкой в чат, так и через кнопку "Прикрепить".</div>
+        
+        <div class="divider"></div>
+        
+        <h2>➕ Добавление нового лида</h2>
+        
+        <p>Добавление происходит пошагово (5 шагов). Бот будет подсказывать, что вводить на каждом шаге.</p>
+        
+        <div class="tip">Вы можете начать добавление тремя способами:
+            <ul>
+                <li>Нажать кнопку <strong>"➕ Добавить"</strong> в главном меню</li>
+                <li>Переслать сообщение от клиента боту (данные извлекутся автоматически)</li>
+                <li>Отправить фото боту (с текстом или без)</li>
+            </ul>
+        </div>
+        
+        <div class="step">
+            <h3>Шаг 1: Имя клиента <span class="required">⭐</span></h3>
+            <p><strong>Обязательное поле</strong></p>
+            <ul>
+                <li>Введите имя и фамилию клиента</li>
+                <li>Пример: <code>Иван Иванов</code>, <code>John Smith</code></li>
+            </ul>
+            <div class="warning">Если вы переслали сообщение или отправили фото с текстом, это поле может быть уже заполнено</div>
+        </div>
+        
+        <div class="step">
+            <h3>Шаг 2: Facebook ссылка <span class="optional">(можно пропустить)</span></h3>
+            <ul>
+                <li>Вставьте ссылку на профиль Facebook</li>
+                <li>Примеры:
+                    <ul>
+                        <li><code>https://www.facebook.com/username</code></li>
+                        <li><code>facebook.com/username</code></li>
+                    </ul>
+                </li>
+                <li>Кнопка <strong>⏭️ Пропустить</strong> - если ссылки нет</li>
+            </ul>
+            <div class="warning">Важно: добавляйте только прямую ссылку на профиль (без фото, информации и прочих вкладок)</div>
+        </div>
+        
+        <div class="step">
+            <h3>Шаг 3: Имя пользователя Telegram <span class="optional">(можно пропустить)</span></h3>
+            <ul>
+                <li>Введите username без символа @</li>
+                <li>Пример: <code>username</code>, <code>Ivan_123</code></li>
+                <li>Кнопка <strong>⏭️ Пропустить</strong> - если username нет</li>
+            </ul>
+            <div class="warning">Если вы переслали сообщение, это поле может быть уже заполнено</div>
+        </div>
+        
+        <div class="step">
+            <h3>Шаг 4: Telegram ID <span class="optional">(можно пропустить)</span></h3>
+            <ul>
+                <li>Введите числовой ID (только цифры)</li>
+                <li>Пример: <code>123456789</code></li>
+                <li>Кнопка <strong>⏭️ Пропустить</strong> - если ID нет</li>
+            </ul>
+            <div class="warning">Если вы переслали сообщение, это поле может быть уже заполнено</div>
+        </div>
+        
+        <div class="step">
+            <h3>Шаг 5: Проверка данных</h3>
+            <ul>
+                <li>Проверьте все введённые данные</li>
+                <li>Если вы переслали сообщение или отправили фото, фото будет отображаться как "🔗 Открыть фото"</li>
+                <li>Кнопка <strong>💾 Сохранить</strong> - сохранить лид</li>
+                <li>Кнопка <strong>✏️ Редактировать</strong> - изменить имя</li>
+                <li>Кнопка <strong>◀️ Назад</strong> - вернуться к предыдущему полю</li>
+                <li>Кнопка <strong>❌ Отменить</strong> - отменить добавление</li>
+            </ul>
+        </div>
+        
+        <h3>Важно при добавлении:</h3>
+        <ul>
+            <li><span class="required">⭐ Обязательно заполните:</span> Имя клиента</li>
+            <li><strong>📋 Нужен хотя бы один из:</strong> Facebook, Telegram username или Telegram ID</li>
+            <li><strong>📷 Фото:</strong> Если вы переслали сообщение с фото или отправили фото, оно автоматически сохранится при добавлении лида</li>
+        </ul>
+        
+        <h3>Навигация:</h3>
+        <ul>
+            <li><strong>⏭️ Пропустить</strong> - пропустить опциональное поле</li>
+            <li><strong>◀️ Назад</strong> - вернуться к предыдущему полю</li>
+            <li><strong>🏠 Главное меню</strong> - отменить и вернуться в меню</li>
+        </ul>
+        
+        <div class="divider"></div>
+        
+        <h2>✏️ Редактирование лида</h2>
+        
+        <div class="tip">📞 <strong>По вопросам редактирования обращайтесь к:</strong> Renata Rayevskaya</div>
+        
+        <div class="divider"></div>
+        
+        <h2>🛠️ Полезные команды</h2>
+        
+        <div class="step">
+            <h3><code>/q</code></h3>
+            <p>Возврат в главное меню (работает из любого состояния)</p>
+            <div class="tip">Используйте если что-то зависло, не нажимается, не выводит данные (и попробуйте снова).</div>
+        </div>
+        
+        <div class="divider"></div>
+        
+        <h2>Что делать, если бот не отвечает?</h2>
+        <p>Бот может уйти в спящий режим из-за неактивности. Если не отвечает нажмите команду <code>/q</code> и подождите 15 сек.</p>
+        <p>Если проблема сохраняется, обратитесь к <strong>Mark Lindt</strong></p>
+    </div>
+</body>
+</html>
+

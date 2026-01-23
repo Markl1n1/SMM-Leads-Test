@@ -1675,6 +1675,54 @@ async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
         return ConversationHandler.END
 
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /help command - send guide file"""
+    try:
+        user_id = update.effective_user.id
+        logger.info(f"[HELP] Help command received from user {user_id}")
+        
+        # Path to the guide file (relative to the script location)
+        guide_path = "BOT_GUIDE.html"
+        
+        # Check if file exists
+        if not os.path.exists(guide_path):
+            logger.error(f"[HELP] Guide file not found at {guide_path}")
+            await update.message.reply_text(
+                "❌ Файл руководства временно недоступен.\n\n"
+                "Обратитесь к администратору.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return
+        
+        # Send the file as document
+        # Telegram will allow user to download and open it
+        # Using file path directly - python-telegram-bot will handle file opening
+        await retry_telegram_api(
+            update.message.reply_document,
+            document=guide_path,
+            filename="BOT_GUIDE.html",
+            caption="📖 Руководство пользователя ClientsBot\n\n"
+                   "Скачайте файл и откройте его в браузере для просмотра.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        
+        logger.info(f"[HELP] Guide file sent successfully to user {user_id}")
+        
+    except FileNotFoundError:
+        logger.error(f"[HELP] Guide file not found")
+        await update.message.reply_text(
+            "❌ Файл руководства не найден.\n\n"
+            "Обратитесь к администратору.",
+            reply_markup=get_main_menu_keyboard()
+        )
+    except Exception as e:
+        logger.error(f"[HELP] Error sending guide file: {e}", exc_info=True)
+        await update.message.reply_text(
+            "❌ Произошла ошибка при отправке руководства.\n\n"
+            "Попробуйте позже или обратитесь к администратору.",
+            reply_markup=get_main_menu_keyboard()
+        )
+
 # Callback query handlers
 async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle check_menu callback - start smart check input"""
@@ -2275,6 +2323,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         
         if all_results:
             # Show results
+            photo_url = None  # Initialize for multiple results case
             if len(all_results) > 1:
                 message_parts = [f"✅ <b>Найдено клиентов: {len(all_results)}</b>\n"]
                 
@@ -2317,10 +2366,19 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                 result = all_results[0]
                 message_parts = ["✅ <b>Лид найден</b>", ""]
                 
+                # Check if photo exists
+                photo_url = result.get('photo_url')
+                if photo_url:
+                    photo_url = str(photo_url).strip()
+                
                 for field_name_key, field_label in field_labels.items():
                     value = result.get(field_name_key)
                     
                     if value is None or value == '' or value == 'Не указано':
+                        continue
+                    
+                    # Skip photo_url field - we'll send it as attached image
+                    if field_name_key == 'photo_url':
                         continue
                     
                     # Format date field
@@ -2367,12 +2425,22 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         else:
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
+            photo_url = None
         
-        sent_message = await update.message.reply_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
+        # Send message with photo if available (only for single result)
+        if len(all_results) == 1 and photo_url:
+            sent_message = await update.message.reply_photo(
+                photo=photo_url,
+                caption=message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        else:
+            sent_message = await update.message.reply_text(
+                message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
         await save_check_message(update, context, sent_message.message_id)
         
     except Exception as e:
@@ -2499,6 +2567,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
         
         if response.data and len(response.data) > 0:
             results = response.data
+            photo_url = None  # Initialize for multiple results case
             
             # If multiple results, show all
             if len(results) > 1:
@@ -2545,11 +2614,20 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                 result = results[0]
                 message_parts = ["✅ <b>Лид найден</b>", ""]  # Empty line after header
                 
+                # Check if photo exists
+                photo_url = result.get('photo_url')
+                if photo_url:
+                    photo_url = str(photo_url).strip()
+                
                 for field_name_key, field_label in field_labels.items():
                     value = result.get(field_name_key)
                     
                     # Skip if None, empty string, or 'Не указано'
                     if value is None or value == '' or value == 'Не указано':
+                        continue
+                    
+                    # Skip photo_url field - we'll send it as attached image
+                    if field_name_key == 'photo_url':
                         continue
                     
                     # Format date field
@@ -2568,11 +2646,6 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
-                    elif field_name_key == 'photo_url':
-                        # Format photo_url as clickable link
-                        url = str(value).strip()
-                        if url:
-                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
@@ -2604,12 +2677,22 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             logger.warning(f"[{search_type}] ❌ No results found for {db_field_name} = '{search_value}'")
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
+            photo_url = None
         
-        sent_message = await update.message.reply_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
+        # Send message with photo if available (only for single result)
+        if len(results) == 1 and photo_url:
+            sent_message = await update.message.reply_photo(
+                photo=photo_url,
+                caption=message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        else:
+            sent_message = await update.message.reply_text(
+                message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
         # Save message ID for cleanup
         await save_check_message(update, context, sent_message.message_id)
         
@@ -2714,6 +2797,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if response.data and len(response.data) > 0:
             results = response.data
+            photo_url = None  # Initialize for multiple results case
             
             # Check if more than 10 results
             if len(results) > 10:
@@ -2768,11 +2852,20 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 result = results[0]
                 message_parts = ["✅ <b>Лид найден</b>", ""]  # Empty line after header
                 
+                # Check if photo exists
+                photo_url = result.get('photo_url')
+                if photo_url:
+                    photo_url = str(photo_url).strip()
+                
                 for field_name_key, field_label in field_labels.items():
                     value = result.get(field_name_key)
                     
                     # Skip if None, empty string, or 'Не указано'
                     if value is None or value == '' or value == 'Не указано':
+                        continue
+                    
+                    # Skip photo_url field - we'll send it as attached image
+                    if field_name_key == 'photo_url':
                         continue
             
                     # Format date field
@@ -2791,11 +2884,6 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
-                    elif field_name_key == 'photo_url':
-                        # Format photo_url as clickable link
-                        url = str(value).strip()
-                        if url:
-                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
@@ -2827,12 +2915,22 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"[FULLNAME SEARCH] ❌ No results found for pattern '{pattern}' (search_value: '{search_value}', escaped: '{escaped_search_value}')")
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
+            photo_url = None
         
-        await update.message.reply_text(
-            message,
-            reply_markup=reply_markup,
-            parse_mode='HTML'
-        )
+        # Send message with photo if available (only for single result)
+        if len(results) == 1 and photo_url:
+            await update.message.reply_photo(
+                photo=photo_url,
+                caption=message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+        else:
+            await update.message.reply_text(
+                message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
         
     except Exception as e:
         logger.error(f"[FULLNAME SEARCH] ❌ Error checking by fullname: {e}", exc_info=True)
@@ -5315,6 +5413,7 @@ def create_telegram_app():
     # Add command handlers
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("q", quit_command))
+    telegram_app.add_handler(CommandHandler("help", help_command))
     # Note: /q command has high priority and will work from any state
     # /tag is handled via tag_conv ConversationHandler entry_points
 
