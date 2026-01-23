@@ -955,7 +955,14 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /tag command - show list of manager_name to change tag"""
     try:
         user_id = update.effective_user.id
-        logger.info(f"[TAG] /tag command received from user {user_id}")
+        from_user = update.effective_user
+        logger.info(
+            f"[TAG] /tag command received from user_id={user_id}, "
+            f"name='{from_user.first_name} {from_user.last_name}', "
+            f"username='{from_user.username}', "
+            f"context_keys_before_clear={list(context.user_data.keys()) if context.user_data else []}"
+        )
+        logger.info(f"[TAG] ALLOWED_TAG_MANAGERS={ALLOWED_TAG_MANAGERS}")
         
         # Check access
         if not is_user_allowed_to_change_tags(update):
@@ -968,11 +975,13 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Clear conversation state
         clear_all_conversation_state(context, user_id)
+        logger.info(f"[TAG] State cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
         
         # Get Supabase client
         client = get_supabase_client()
         if not client:
             error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+            logger.error(f"[TAG] get_supabase_client returned None for user {user_id}")
             await update.message.reply_text(
                 error_msg,
                 reply_markup=get_main_menu_keyboard(),
@@ -982,6 +991,7 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Get unique manager names
         manager_names = get_unique_manager_names(client)
+        logger.info(f"[TAG] Loaded {len(manager_names)} unique manager_name values for user {user_id}: {manager_names}")
         
         if not manager_names:
             await update.message.reply_text(
@@ -992,6 +1002,7 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Store manager names in context for later retrieval (to avoid long callback_data)
         context.user_data['tag_manager_names'] = manager_names
+        logger.info(f"[TAG] Stored tag_manager_names in context for user {user_id}")
         
         # Create keyboard with manager names
         keyboard = []
@@ -1021,9 +1032,10 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         
+        logger.info(f"[TAG] Sent manager selection keyboard to user {user_id}, expecting TAG_SELECT_MANAGER")
         return TAG_SELECT_MANAGER
     except Exception as e:
-        logger.error(f"Error in tag_command: {e}", exc_info=True)
+        logger.error(f"[TAG] Error in tag_command: {e}", exc_info=True)
         try:
             await update.message.reply_text(
                 "❌ Произошла ошибка при обработке команды. Попробуйте позже.",
@@ -1040,7 +1052,12 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     try:
         user_id = update.effective_user.id
-        logger.info(f"[TAG] tag_manager_callback called for user {user_id}")
+        callback_data = query.data
+        logger.info(
+            f"[TAG] tag_manager_callback called for user {user_id}, "
+            f"callback_data={callback_data}, "
+            f"context_keys={list(context.user_data.keys()) if context.user_data else []}"
+        )
         
         # Check access
         if not is_user_allowed_to_change_tags(update):
@@ -1053,9 +1070,6 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         
         # Extract index from callback_data
         # Format: "tag_mgr_{index}"
-        callback_data = query.data
-        logger.info(f"[TAG] Processing callback_data: {callback_data}")
-        
         if not callback_data.startswith("tag_mgr_"):
             logger.error(f"[TAG] Invalid callback_data: {callback_data}")
             await query.edit_message_text(
@@ -1079,8 +1093,9 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         # Get manager name from stored list
         # If list is not in context (e.g., if called as entry point), reload it
         manager_names = context.user_data.get('tag_manager_names')
+        logger.info(f"[TAG] tag_manager_names in context for user {user_id}: {manager_names}")
         if not manager_names:
-            logger.info(f"[TAG] manager_names not in context, reloading from database")
+            logger.info(f"[TAG] manager_names not in context, reloading from database for user {user_id}")
             client = get_supabase_client()
             if not client:
                 error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
@@ -1094,10 +1109,11 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             if not manager_names:
                 await query.edit_message_text(
                     "❌ В базе данных нет записей с manager_name.",
-                    reply_markup=get_main_menu_keyboard()
+                    reply_markup=get_main_menu_keyboard(),
                 )
                 return ConversationHandler.END
             context.user_data['tag_manager_names'] = manager_names
+            logger.info(f"[TAG] Reloaded tag_manager_names for user {user_id}: {manager_names}")
         
         if index < 0 or index >= len(manager_names):
             logger.error(f"[TAG] Invalid index {index} for manager_names list of length {len(manager_names)}")
@@ -1108,9 +1124,11 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             return ConversationHandler.END
         
         manager_name = manager_names[index]
+        logger.info(f"[TAG] User {user_id} selected manager_name='{manager_name}' (index={index})")
         
         # Save manager_name to context
         context.user_data['tag_manager_name'] = manager_name
+        logger.info(f"[TAG] Saved tag_manager_name in context for user {user_id}, context_keys_now={list(context.user_data.keys()) if context.user_data else []}")
         
         # Ask for new tag
         await query.edit_message_text(
@@ -1122,6 +1140,7 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             ])
         )
         
+        logger.info(f"[TAG] Prompted user {user_id} to enter new tag, expecting TAG_ENTER_NEW")
         return TAG_ENTER_NEW
     except Exception as e:
         logger.error(f"Error in tag_manager_callback: {e}", exc_info=True)
@@ -2538,17 +2557,25 @@ async def check_duplicate_realtime(client, field_name: str, field_value: str) ->
 async def tag_enter_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle new tag input"""
     if not update.message or not update.message.text:
-        logger.error("[TAG] update.message or update.message.text is None")
+        logger.error("[TAG] tag_enter_new: update.message or update.message.text is None")
         return ConversationHandler.END
     
     try:
         user_id = update.effective_user.id
-        text = update.message.text.strip()
+        raw_text = update.message.text
+        text = raw_text.strip()
+        logger.info(
+            f"[TAG] tag_enter_new called for user {user_id}, "
+            f"raw_text='{raw_text}', normalized_text='{text}', "
+            f"context_keys={list(context.user_data.keys()) if context.user_data else []}"
+        )
         
         # Normalize tag
         normalized_tag = normalize_tag(text)
+        logger.info(f"[TAG] tag_enter_new: normalized_tag='{normalized_tag}' for user {user_id}")
         
         if not normalized_tag:
+            logger.warning(f"[TAG] tag_enter_new: empty normalized_tag for user {user_id}")
             await update.message.reply_text(
                 "❌ Тег не может быть пустым. Попробуйте снова:",
                 reply_markup=InlineKeyboardMarkup([
@@ -2560,16 +2587,18 @@ async def tag_enter_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get manager_name from context
         manager_name = context.user_data.get('tag_manager_name')
         if not manager_name:
-            logger.error("[TAG] manager_name not found in context")
+            logger.error(f"[TAG] tag_enter_new: manager_name not found in context for user {user_id}")
             await update.message.reply_text(
                 "❌ Ошибка: не удалось определить менеджера. Попробуйте снова с команды /tag",
                 reply_markup=get_main_menu_keyboard()
             )
             return ConversationHandler.END
+        logger.info(f"[TAG] tag_enter_new: manager_name='{manager_name}' for user {user_id}")
         
         # Get Supabase client
         client = get_supabase_client()
         if not client:
+            logger.error(f"[TAG] tag_enter_new: get_supabase_client returned None for user {user_id}")
             error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
             await update.message.reply_text(
                 error_msg,
@@ -2580,9 +2609,11 @@ async def tag_enter_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Count records that will be updated
         record_count = count_records_by_manager_name(client, manager_name)
+        logger.info(f"[TAG] tag_enter_new: record_count={record_count} for manager_name='{manager_name}' and user {user_id}")
         
         # Save new tag to context
         context.user_data['tag_new_tag'] = normalized_tag
+        logger.info(f"[TAG] tag_enter_new: saved tag_new_tag='{normalized_tag}' in context for user {user_id}, context_keys_now={list(context.user_data.keys()) if context.user_data else []}")
         
         # Show confirmation
         keyboard = InlineKeyboardMarkup([
@@ -2600,9 +2631,10 @@ async def tag_enter_new(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         
+        logger.info(f"[TAG] tag_enter_new: sent confirmation message to user {user_id}, staying in TAG_ENTER_NEW")
         return TAG_ENTER_NEW
     except Exception as e:
-        logger.error(f"Error in tag_enter_new: {e}", exc_info=True)
+        logger.error(f"[TAG] Error in tag_enter_new for user {update.effective_user.id}: {e}", exc_info=True)
         try:
             await update.message.reply_text(
                 "❌ Произошла ошибка. Попробуйте позже.",
