@@ -4780,8 +4780,8 @@ def create_telegram_app():
     # Add command handlers
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(CommandHandler("q", quit_command))
-    telegram_app.add_handler(CommandHandler("tag", tag_command))
     # Note: /q command has high priority and will work from any state
+    # /tag is handled via tag_conv ConversationHandler entry_points
     
     # Global handler for forwarded messages (register BEFORE ConversationHandlers)
     # This allows forwarding messages to work from any state
