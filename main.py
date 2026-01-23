@@ -885,6 +885,15 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
     
+    # ADD LOGGING
+    logger.info(
+        f"[CHECK_ADD_STATE_ENTRY] Called for user {user_id}, "
+        f"message_text='{update.message.text if update.message and update.message.text else None}', "
+        f"current_state={current_state}, "
+        f"pin_attempts={context.user_data.get('pin_attempts')}, "
+        f"conversation_keys={[k for k in (context.user_data.keys() if context.user_data else []) if k.startswith('_conversation_')]}"
+    )
+    
     # PRIORITY CHECK: Check for indicators of other active flows BEFORE checking add flow
     # These checks use context.user_data keys that are set during tag/edit flows
     
@@ -1458,7 +1467,13 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         message = "🔒 Для изменения тега менеджера требуется PIN-код.\n\nВведите PIN-код:"
         await update.message.reply_text(message)
         
-        logger.info(f"[TAG] Requested PIN code from user {user_id}, expecting TAG_PIN, current_state set to TAG_PIN")
+        # ADD THIS LOGGING
+        log_conversation_state(user_id, context, prefix="[TAG_AFTER_PIN_REQUEST]")
+        
+        logger.info(
+            f"[TAG] Requested PIN code from user {user_id}, expecting TAG_PIN, current_state set to TAG_PIN. "
+            f"Returning TAG_PIN state."
+        )
         return TAG_PIN
     except Exception as e:
         logger.error(f"[TAG] Error in tag_command: {e}", exc_info=True)
@@ -1474,6 +1489,15 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PIN code input for tag command"""
     user_id = update.effective_user.id
+    
+    # ADD DETAILED LOGGING AT THE START
+    logger.info(
+        f"[TAG_PIN_INPUT] ⚡ Function CALLED for user {user_id}, "
+        f"message_text='{update.message.text if update.message and update.message.text else None}', "
+        f"current_state={context.user_data.get('current_state')}, "
+        f"pin_attempts={context.user_data.get('pin_attempts')}, "
+        f"conversation_keys={[k for k in (context.user_data.keys() if context.user_data else []) if k.startswith('_conversation_')]}"
+    )
     
     # Check if message exists and has text
     if not update.message or not update.message.text:
@@ -5610,10 +5634,21 @@ def create_telegram_app():
                 is_forwarded = bool(
                     msg.forward_from or msg.forward_from_chat or msg.forward_sender_name
                 )
-                logger.info(
-                    f"[UPDATE] type=message user_id={user_id} "
-                    f"text='{msg.text or ''}' is_forwarded={is_forwarded}"
-                )
+                # ADD DETAILED LOGGING FOR TEXT MESSAGES (especially for tag PIN input)
+                if msg.text and not msg.text.startswith('/'):
+                    logger.info(
+                        f"[UPDATE] type=message user_id={user_id} "
+                        f"text='{msg.text}' is_forwarded={is_forwarded} "
+                        f"is_command=False"
+                    )
+                    # Log conversation state for text messages to track tag flow
+                    if user_id is not None:
+                        log_conversation_state(user_id, context, prefix="[UPDATE_TEXT_MSG]")
+                else:
+                    logger.info(
+                        f"[UPDATE] type=message user_id={user_id} "
+                        f"text='{msg.text or ''}' is_forwarded={is_forwarded}"
+                    )
             elif getattr(update, "callback_query", None):
                 q = update.callback_query
                 logger.info(
@@ -5622,7 +5657,8 @@ def create_telegram_app():
             else:
                 logger.info(f"[UPDATE] type=other raw_update={update}")
 
-            if user_id is not None:
+            if user_id is not None and not (getattr(update, "message", None) and update.message.text and not update.message.text.startswith('/')):
+                # Log state for non-text messages (already logged above for text messages)
                 log_conversation_state(user_id, context, prefix="[UPDATE_STATE]")
         except Exception as e:
             logger.error(f"[UPDATE] Failed to log update: {e}", exc_info=True)
