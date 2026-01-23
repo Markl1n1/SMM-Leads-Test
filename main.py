@@ -704,17 +704,61 @@ def build_lead_photo_path(lead_id: int, extension: str = "jpg") -> str:
     unique = uuid.uuid4().hex[:8]
     return f"photos/lead_{lead_id}_{unique}.{extension}"
 
-async def download_photo_from_url(url: str) -> bytes | None:
-    """Download photo from URL and return as bytes"""
+async def download_photo_from_supabase(photo_url: str) -> bytes | None:
+    """Download photo from Supabase Storage using storage client and return as bytes"""
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-            logger.info(f"[PHOTO] Successfully downloaded photo from URL: {url[:50]}... ({len(response.content)} bytes)")
-            return response.content
+        # Extract storage path from URL
+        # URL format: https://{project}.supabase.co/storage/v1/object/public/{bucket}/{path}
+        # Example: https://mwovubdpxkeqpyxsadgg.supabase.co/storage/v1/object/public/Leads/photos/lead_2051_f475f8b3.jpg
+        if not photo_url or not photo_url.strip():
+            logger.error("[PHOTO] Empty photo_url provided")
+            return None
+        
+        # Remove query parameters if any
+        photo_url = photo_url.split('?')[0]
+        
+        # Extract path from URL
+        # Find the bucket name and path after /object/public/
+        if '/object/public/' not in photo_url:
+            logger.error(f"[PHOTO] Invalid Supabase Storage URL format: {photo_url}")
+            return None
+        
+        # Extract path after /object/public/{bucket}/
+        parts = photo_url.split('/object/public/')
+        if len(parts) < 2:
+            logger.error(f"[PHOTO] Could not parse URL: {photo_url}")
+            return None
+        
+        path_with_bucket = parts[1]
+        # Split bucket and path
+        path_parts = path_with_bucket.split('/', 1)
+        if len(path_parts) < 2:
+            logger.error(f"[PHOTO] Could not extract path from URL: {photo_url}")
+            return None
+        
+        bucket_name = path_parts[0]
+        storage_path = path_parts[1]
+        
+        logger.info(f"[PHOTO] Extracted bucket='{bucket_name}', path='{storage_path}' from URL")
+        
+        # Use storage client to download file
+        client = get_supabase_storage_client()
+        if not client:
+            logger.error("[PHOTO] Supabase Storage client is None, cannot download photo")
+            return None
+        
+        # Download file from Supabase Storage
+        file_data = client.storage.from_(bucket_name).download(storage_path)
+        
+        if file_data:
+            logger.info(f"[PHOTO] Successfully downloaded photo from Supabase Storage: {len(file_data)} bytes")
+            return file_data
+        else:
+            logger.error(f"[PHOTO] download() returned None for path: {storage_path}")
+            return None
+            
     except Exception as e:
-        logger.error(f"[PHOTO] Error downloading photo from URL {url}: {e}", exc_info=True)
+        logger.error(f"[PHOTO] Error downloading photo from Supabase Storage: {e}", exc_info=True)
         return None
 
 async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str | None:
@@ -2511,7 +2555,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         if len(all_results) == 1 and photo_url:
             try:
                 # Try to download and send as file
-                photo_bytes = await download_photo_from_url(photo_url)
+                photo_bytes = await download_photo_from_supabase(photo_url)
                 if photo_bytes:
                     photo_file = io.BytesIO(photo_bytes)
                     sent_message = await update.message.reply_photo(
@@ -2783,7 +2827,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
         if len(results) == 1 and photo_url:
             try:
                 # Try to download and send as file
-                photo_bytes = await download_photo_from_url(photo_url)
+                photo_bytes = await download_photo_from_supabase(photo_url)
                 if photo_bytes:
                     photo_file = io.BytesIO(photo_bytes)
                     sent_message = await update.message.reply_photo(
@@ -3041,7 +3085,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(results) == 1 and photo_url:
             try:
                 # Try to download and send as file
-                photo_bytes = await download_photo_from_url(photo_url)
+                photo_bytes = await download_photo_from_supabase(photo_url)
                 if photo_bytes:
                     photo_file = io.BytesIO(photo_bytes)
                     await update.message.reply_photo(
