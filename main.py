@@ -709,6 +709,8 @@ async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str 
         
         # 3) Download file content as bytes
         file_bytes = await tg_file.download_as_bytearray()
+        # Convert bytearray to bytes for Supabase Storage API compatibility
+        file_bytes = bytes(file_bytes)
         file_size = len(file_bytes)
         logger.info(f"[PHOTO] Downloaded photo for lead {lead_id}: {file_size} bytes, extension: {ext}")
         
@@ -1129,6 +1131,8 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # Update access time
         user_data_store_access_time[user_id] = time.time()
         
+        logger.info(f"[FORWARD_GLOBAL] Saved extracted data to user_data_store for user {user_id}: {list(extracted_data.keys())}")
+        
         # Show user what was extracted
         if extracted_info:
             info_text = "\n".join(extracted_info)
@@ -1152,10 +1156,12 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         
         # Move to next field or review
         if next_field == 'review':
+            logger.info(f"[FORWARD_GLOBAL] All fields filled, showing review for user {user_id}")
             await show_add_review(update, context)
             # Return None to let ConversationHandler handle the state transition
             return None
         else:
+            logger.info(f"[FORWARD_GLOBAL] Starting add flow from field '{next_field}' (step {current_step}/{total_steps}) for user {user_id}")
             field_label = get_field_label(next_field)
             is_optional = next_field not in ['fullname']
             progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
@@ -1185,16 +1191,19 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return None
     
     user_id = update.effective_user.id
+    logger.info(f"[PHOTO_MESSAGE] Processing photo message from user {user_id}")
     
     # Check if message is forwarded - if yes, let handle_forwarded_message handle it
     is_forwarded = (update.message.forward_from is not None or 
                     update.message.forward_from_chat is not None or 
                     update.message.forward_sender_name is not None)
     if is_forwarded:
+        logger.info(f"[PHOTO_MESSAGE] Message is forwarded, delegating to handle_forwarded_message")
         return None  # Let handle_forwarded_message handle forwarded messages
     
     # Check if message has photo
     if not update.message.photo:
+        logger.info(f"[PHOTO_MESSAGE] Message has no photo, skipping")
         return None
     
     # Check if user is in another active ConversationHandler
@@ -1221,10 +1230,12 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Extract photo
     largest_photo = update.message.photo[-1]
     photo_file_id = largest_photo.file_id
+    logger.info(f"[PHOTO_MESSAGE] Extracted photo_file_id: {photo_file_id} for user {user_id}")
     
     # Check if message has text or caption
     has_text = bool(update.message.text and update.message.text.strip())
     has_caption = bool(update.message.caption and update.message.caption.strip())
+    logger.info(f"[PHOTO_MESSAGE] Scenario: {'with text' if (has_text or has_caption) else 'without text'} for user {user_id}")
     
     # Initialize add flow
     clear_all_conversation_state(context, user_id)
@@ -4253,18 +4264,21 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             # Try to upload photo if we extracted it earlier
             user_photo_file_id = user_data.get('photo_file_id')
-            if lead_id and user_photo_file_id:
-                logger.info(f"[PHOTO] Trying to upload photo for lead {lead_id} from file_id={user_photo_file_id}")
-                photo_url = await upload_lead_photo_to_supabase(context.bot, user_photo_file_id, lead_id)
-                if photo_url:
-                    try:
-                        # Update the lead with photo_url
-                        client.table(TABLE_NAME).update({"photo_url": photo_url}).eq("id", lead_id).execute()
-                        logger.info(f"[PHOTO] Successfully saved photo_url for lead {lead_id}: {photo_url}")
-                    except Exception as e:
-                        logger.error(f"[PHOTO] Failed to save photo_url for lead {lead_id}: {e}", exc_info=True)
+            if lead_id:
+                if user_photo_file_id:
+                    logger.info(f"[PHOTO] Starting photo upload for lead {lead_id} from file_id={user_photo_file_id}")
+                    photo_url = await upload_lead_photo_to_supabase(context.bot, user_photo_file_id, lead_id)
+                    if photo_url:
+                        try:
+                            # Update the lead with photo_url
+                            client.table(TABLE_NAME).update({"photo_url": photo_url}).eq("id", lead_id).execute()
+                            logger.info(f"[PHOTO] Successfully saved photo_url for lead {lead_id}: {photo_url}")
+                        except Exception as e:
+                            logger.error(f"[PHOTO] Failed to save photo_url to database for lead {lead_id}: {e}", exc_info=True)
+                    else:
+                        logger.warning(f"[PHOTO] Photo upload failed (returned None) for lead {lead_id}, file_id={user_photo_file_id}")
                 else:
-                    logger.warning(f"[PHOTO] upload_lead_photo_to_supabase returned None for lead {lead_id}")
+                    logger.info(f"[PHOTO] No photo_file_id in user_data for lead {lead_id}, skipping photo upload")
             
             # Log all fields with their values
             field_labels = {
