@@ -56,6 +56,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 WEBHOOK_URL = os.environ.get('WEBHOOK_URL')
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+# Service role key for Storage operations (bypasses RLS)
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
 TABLE_NAME = os.environ.get('TABLE_NAME', 'facebook_leads')  # Default table name
 PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 
@@ -65,6 +67,8 @@ ENABLE_LEAD_PHOTOS = os.environ.get('ENABLE_LEAD_PHOTOS', 'true').lower() == 'tr
 
 # Supabase client - thread-safe, can be used concurrently by multiple users
 supabase: Client = None
+# Separate client for Storage operations (uses service_role key to bypass RLS)
+supabase_storage: Client = None
 
 # Keep-alive scheduler
 scheduler = None
@@ -137,7 +141,7 @@ async def retry_telegram_api(func, max_retries=3, delay=1, backoff=2, *args, **k
     raise last_exception
 
 def get_supabase_client():
-    """Initialize and return Supabase client"""
+    """Initialize and return Supabase client (uses anon key)"""
     global supabase
     if supabase is None:
         try:
@@ -154,6 +158,28 @@ def get_supabase_client():
             logger.error(f"Error initializing Supabase client: {e}", exc_info=True)
             return None
     return supabase
+
+def get_supabase_storage_client():
+    """Initialize and return Supabase client for Storage operations (uses service_role key to bypass RLS)"""
+    global supabase_storage
+    if supabase_storage is None:
+        try:
+            if not SUPABASE_SERVICE_ROLE_KEY:
+                logger.warning("SUPABASE_SERVICE_ROLE_KEY not found, falling back to SUPABASE_KEY for Storage operations")
+                # Fallback to regular key if service_role not provided
+                return get_supabase_client()
+            
+            if not SUPABASE_URL:
+                logger.error("SUPABASE_URL not found in environment variables")
+                return None
+            
+            supabase_storage = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+            logger.info("[STORAGE] Initialized Supabase Storage client with service_role key")
+        except Exception as e:
+            logger.error(f"Error initializing Supabase Storage client: {e}", exc_info=True)
+            # Fallback to regular client
+            return get_supabase_client()
+    return supabase_storage
 
 def normalize_telegram_id(tg_id: str) -> str:
     """Normalize Telegram ID: extract only digits (similar to phone)"""
@@ -686,9 +712,10 @@ async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str 
         logger.info(f"[PHOTO] Photo upload disabled by ENABLE_LEAD_PHOTOS for lead {lead_id}")
         return None
     
-    client = get_supabase_client()
+    # Use storage client with service_role key to bypass RLS
+    client = get_supabase_storage_client()
     if not client:
-        logger.error(f"[PHOTO] Supabase client is None, cannot upload photo for lead {lead_id}")
+        logger.error(f"[PHOTO] Supabase Storage client is None, cannot upload photo for lead {lead_id}")
         return None
     
     try:
