@@ -36,6 +36,7 @@ import signal
 import sys
 import threading
 import asyncio
+import uuid
 from functools import wraps
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -60,6 +61,10 @@ PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 
 # Allowed manager names for /tag command (comma-separated list)
 ALLOWED_TAG_MANAGERS = [name.strip() for name in os.environ.get('ALLOWED_TAG_MANAGERS', '').split(',') if name.strip()] if os.environ.get('ALLOWED_TAG_MANAGERS') else []
+
+# Photo upload configuration
+SUPABASE_LEADS_BUCKET = os.environ.get('SUPABASE_LEADS_BUCKET', 'Leads')  # Supabase Storage bucket name
+ENABLE_LEAD_PHOTOS = os.environ.get('ENABLE_LEAD_PHOTOS', 'true').lower() == 'true'  # Enable/disable photo uploads
 
 # Supabase client - thread-safe, can be used concurrently by multiple users
 supabase: Client = None
@@ -705,6 +710,70 @@ def get_add_menu_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# Photo handling functions
+def build_lead_photo_path(lead_id: int, extension: str = "jpg") -> str:
+    """Generate unique storage path for lead photo"""
+    unique = uuid.uuid4().hex[:8]
+    return f"photos/lead_{lead_id}_{unique}.{extension}"
+
+async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str | None:
+    """
+    Download photo from Telegram and upload to Supabase Storage.
+    Returns public URL of uploaded photo or None if failed.
+    """
+    if not ENABLE_LEAD_PHOTOS:
+        logger.info(f"[PHOTO] Photo upload disabled by ENABLE_LEAD_PHOTOS for lead {lead_id}")
+        return None
+    
+    client = get_supabase_client()
+    if not client:
+        logger.error(f"[PHOTO] Supabase client is None, cannot upload photo for lead {lead_id}")
+        return None
+    
+    try:
+        # 1) Get file from Telegram
+        tg_file = await bot.get_file(file_id)
+        logger.info(f"[PHOTO] Got Telegram file for lead {lead_id}: {tg_file.file_path if tg_file.file_path else 'no path'}")
+        
+        # 2) Determine file extension
+        ext = "jpg"  # default
+        if tg_file.file_path:
+            file_path_lower = tg_file.file_path.lower()
+            if file_path_lower.endswith(".png"):
+                ext = "png"
+            elif file_path_lower.endswith(".webp"):
+                ext = "webp"
+            elif file_path_lower.endswith(".jpeg") or file_path_lower.endswith(".jpg"):
+                ext = "jpg"
+        
+        # 3) Download file content as bytes
+        file_bytes = await tg_file.download_as_bytearray()
+        file_size = len(file_bytes)
+        logger.info(f"[PHOTO] Downloaded photo for lead {lead_id}: {file_size} bytes, extension: {ext}")
+        
+        # 4) Build storage path
+        storage_path = build_lead_photo_path(lead_id, ext)
+        logger.info(f"[PHOTO] Storage path for lead {lead_id}: {storage_path}")
+        
+        # 5) Upload to Supabase Storage
+        # Note: Supabase Python client uses from_() method (with underscore) to avoid conflict with 'from' keyword
+        response = client.storage.from_(SUPABASE_LEADS_BUCKET).upload(
+            path=storage_path,
+            file=file_bytes,
+            file_options={"content-type": f"image/{ext}"}
+        )
+        
+        logger.info(f"[PHOTO] Upload response for lead {lead_id}: {response}")
+        
+        # 6) Get public URL
+        public_url = client.storage.from_(SUPABASE_LEADS_BUCKET).get_public_url(storage_path)
+        logger.info(f"[PHOTO] Successfully uploaded photo for lead {lead_id}: {public_url}")
+        return public_url
+        
+    except Exception as e:
+        logger.error(f"[PHOTO] Error uploading photo for lead {lead_id}: {e}", exc_info=True)
+        return None
+
 # Helper function to clear all conversation state including internal ConversationHandler keys
 def clear_all_conversation_state(context: ContextTypes.DEFAULT_TYPE, user_id: int = None):
     """Clear all conversation state including internal ConversationHandler keys (_conversation_*)"""
@@ -735,6 +804,22 @@ def clear_all_conversation_state(context: ContextTypes.DEFAULT_TYPE, user_id: in
             del user_data_store[user_id]
         if user_id in user_data_store_access_time:
             del user_data_store_access_time[user_id]
+
+
+def log_conversation_state(user_id: int, context: ContextTypes.DEFAULT_TYPE, prefix: str = "[STATE]") -> None:
+    """Log current conversation-related state for diagnostics."""
+    try:
+        user_keys = list(context.user_data.keys()) if context.user_data else []
+        conversation_keys = [key for key in user_keys if key.startswith("_conversation_")]
+        in_user_store = user_id in user_data_store
+        logger.info(
+            f"{prefix} user_id={user_id}, "
+            f"user_keys={user_keys}, "
+            f"conversation_keys={conversation_keys}, "
+            f"in_user_data_store={in_user_store}"
+        )
+    except Exception as e:
+        logger.error(f"{prefix} Failed to log conversation state for user_id={user_id}: {e}", exc_info=True)
 
 async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Check if user has add state initialized (from forwarded message) and enter ConversationHandler"""
@@ -858,6 +943,15 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
                 extracted_data['facebook_link'] = fb_normalized
                 extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
                 logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from message text: {fb_normalized}")
+        
+        # Extract photo if available
+        if update.message.photo:
+            # Get largest photo (last in the list)
+            largest_photo = update.message.photo[-1]
+            photo_file_id = largest_photo.file_id
+            extracted_data['photo_file_id'] = photo_file_id
+            extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
+            logger.info(f"[FORWARD_GLOBAL] Extracted photo_file_id for user {user_id}: {photo_file_id}")
         
         # Save extracted data to user_data_store
         for key, value in extracted_data.items():
@@ -1404,7 +1498,8 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                     pass
                 return ConversationHandler.END
         
-        # Log the unknown callback for debugging
+        # Log the unknown callback for debugging, with state
+        log_conversation_state(user_id or -1, context, prefix="[UNKNOWN_CALLBACK_STATE]")
         logger.warning(f"[UNKNOWN_CALLBACK] Unknown callback query: '{callback_data}' from user {user_id}")
         
         try:
@@ -1835,6 +1930,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
             'manager_tag': 'Тег',
+            'photo_url': 'Фото',
             'created_at': 'Дата'
         }
         
@@ -1869,6 +1965,11 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                         if field_name_key == 'manager_tag':
                             tag_value = str(value).strip()
                             message_parts.append(f"{field_label}: @{tag_value}")
+                        elif field_name_key == 'photo_url':
+                            # Format photo_url as clickable link
+                            url = str(value).strip()
+                            if url:
+                                message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                         else:
                             escaped_value = escape_html(str(value))
                             message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
@@ -2053,6 +2154,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
             'manager_tag': 'Тег',
+            'photo_url': 'Фото',
             'created_at': 'Дата'
         }
         
@@ -2090,6 +2192,11 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                         if field_name_key == 'manager_tag':
                             tag_value = str(value).strip()
                             message_parts.append(f"{field_label}: @{tag_value}")
+                        elif field_name_key == 'photo_url':
+                            # Format photo_url as clickable link
+                            url = str(value).strip()
+                            if url:
+                                message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                         else:
                             # Format value in code tags for easy copying
                             escaped_value = escape_html(str(value))
@@ -2122,6 +2229,11 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
+                    elif field_name_key == 'photo_url':
+                        # Format photo_url as clickable link
+                        url = str(value).strip()
+                        if url:
+                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
@@ -2257,6 +2369,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'telegram_id': 'Telegram ID',
             'manager_name': 'Добавил',
             'manager_tag': 'Тег',
+            'photo_url': 'Фото',
             'created_at': 'Дата'
         }
         
@@ -2285,27 +2398,32 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         # Skip if None, empty string, or 'Не указано'
                         if value is None or value == '' or value == 'Не указано':
                             continue
-                        
-                        # Format date field
-                        if field_name_key == 'created_at':
-                            try:
-                                dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-                                value = dt.strftime('%d.%m.%Y %H:%M')
-                            except:
-                                pass
-                        
-                        # Format Facebook link to full URL
-                        if field_name_key == 'facebook_link':
-                            value = format_facebook_link_for_display(value)
-                        
-                        # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
-                        if field_name_key == 'manager_tag':
-                            tag_value = str(value).strip()
-                            message_parts.append(f"{field_label}: @{tag_value}")
-                        else:
-                            # Format value in code tags for easy copying
-                            escaped_value = escape_html(str(value))
-                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    
+                    # Format date field
+                    if field_name_key == 'created_at':
+                        try:
+                            dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                            value = dt.strftime('%d.%m.%Y %H:%M')
+                        except:
+                            pass
+                    
+                    # Format Facebook link to full URL
+                    if field_name_key == 'facebook_link':
+                        value = format_facebook_link_for_display(value)
+                    
+                    # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
+                    if field_name_key == 'manager_tag':
+                        tag_value = str(value).strip()
+                        message_parts.append(f"{field_label}: @{tag_value}")
+                    elif field_name_key == 'photo_url':
+                        # Format photo_url as clickable link
+                        url = str(value).strip()
+                        if url:
+                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
+                    else:
+                        # Format value in code tags for easy copying
+                        escaped_value = escape_html(str(value))
+                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
             else:
                 # Single result
                 result = results[0]
@@ -2334,6 +2452,11 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
+                    elif field_name_key == 'photo_url':
+                        # Format photo_url as clickable link
+                        url = str(value).strip()
+                        if url:
+                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
                     else:
                         # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
@@ -2651,6 +2774,8 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     user_id = update.effective_user.id
+    # Diagnostic: log state when entering add_field_input
+    log_conversation_state(user_id, context, prefix="[ADD_FIELD_STATE]")
     
     # PRIORITY 1: Check if message is forwarded (before checking text)
     # Check for forwarded message (either forward_from or forward_from_chat or forward_sender_name)
@@ -2728,6 +2853,15 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         extracted_data['facebook_link'] = fb_normalized
                         extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
                         logger.info(f"[ADD_FIELD] Extracted facebook_link from message text: {fb_normalized}")
+                
+                # Extract photo if available
+                if update.message.photo:
+                    # Get largest photo (last in the list)
+                    largest_photo = update.message.photo[-1]
+                    photo_file_id = largest_photo.file_id
+                    extracted_data['photo_file_id'] = photo_file_id
+                    extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
+                    logger.info(f"[ADD_FIELD] Extracted photo_file_id for user {user_id}: {photo_file_id}")
                 
                 # Save extracted data to user_data_store
                 for key, value in extracted_data.items():
@@ -3784,8 +3918,24 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Log successful save with all fields
         if response.data and len(response.data) > 0:
             saved_lead = response.data[0]
+            lead_id = saved_lead.get('id')
             logger.info(f"[NEW_LEAD_SAVED] ✅ New lead successfully saved to database")
-            logger.info(f"[NEW_LEAD_SAVED] Lead ID: {saved_lead.get('id')}")
+            logger.info(f"[NEW_LEAD_SAVED] Lead ID: {lead_id}")
+            
+            # Try to upload photo if we extracted it earlier
+            user_photo_file_id = user_data.get('photo_file_id')
+            if lead_id and user_photo_file_id:
+                logger.info(f"[PHOTO] Trying to upload photo for lead {lead_id} from file_id={user_photo_file_id}")
+                photo_url = await upload_lead_photo_to_supabase(context.bot, user_photo_file_id, lead_id)
+                if photo_url:
+                    try:
+                        # Update the lead with photo_url
+                        client.table(TABLE_NAME).update({"photo_url": photo_url}).eq("id", lead_id).execute()
+                        logger.info(f"[PHOTO] Successfully saved photo_url for lead {lead_id}: {photo_url}")
+                    except Exception as e:
+                        logger.error(f"[PHOTO] Failed to save photo_url for lead {lead_id}: {e}", exc_info=True)
+                else:
+                    logger.warning(f"[PHOTO] upload_lead_photo_to_supabase returned None for lead {lead_id}")
             
             # Log all fields with their values
             field_labels = {
@@ -3795,6 +3945,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'facebook_link': 'Facebook Ссылка (facebook_link)',
                 'telegram_user': 'Имя пользователя Telegram (telegram_user)',
                 'telegram_id': 'Telegram ID (telegram_id)',
+                'photo_url': 'Фото (photo_url)',
                 'created_at': 'Дата создания (created_at)'
             }
             
@@ -4776,6 +4927,15 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     """Handle errors in Telegram handlers"""
     logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
     
+    # Extra diagnostics for tag-related flows
+    try:
+        from telegram import Update as TgUpdate  # type: ignore
+        if isinstance(update, TgUpdate) and update.effective_user:
+            user_id = update.effective_user.id
+            log_conversation_state(user_id, context, prefix="[ERROR_STATE]")
+    except Exception as state_err:
+        logger.error(f"[ERROR_STATE] Failed to log state in error_handler: {state_err}", exc_info=True)
+    
     # Try to notify user if update is available
     # Use direct calls without retry to avoid infinite recursion
     if update and isinstance(update, Update):
@@ -4814,6 +4974,35 @@ def create_telegram_app():
     telegram_app.add_handler(CommandHandler("q", quit_command))
     # Note: /q command has high priority and will work from any state
     # /tag is handled via tag_conv ConversationHandler entry_points
+
+    async def debug_log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Global debug logger for all updates (does not interfere with handlers)."""
+        try:
+            user_id = update.effective_user.id if getattr(update, "effective_user", None) else None
+            if getattr(update, "message", None):
+                msg = update.message
+                is_forwarded = bool(
+                    msg.forward_from or msg.forward_from_chat or msg.forward_sender_name
+                )
+                logger.info(
+                    f"[UPDATE] type=message user_id={user_id} "
+                    f"text='{msg.text or ''}' is_forwarded={is_forwarded}"
+                )
+            elif getattr(update, "callback_query", None):
+                q = update.callback_query
+                logger.info(
+                    f"[UPDATE] type=callback user_id={user_id} data='{q.data}'"
+                )
+            else:
+                logger.info(f"[UPDATE] type=other raw_update={update}")
+
+            if user_id is not None:
+                log_conversation_state(user_id, context, prefix="[UPDATE_STATE]")
+        except Exception as e:
+            logger.error(f"[UPDATE] Failed to log update: {e}", exc_info=True)
+
+    # Global debug logger - register early, but it never returns states so it won't affect flows
+    telegram_app.add_handler(MessageHandler(filters.ALL, debug_log_update), group=99)
     
     # Global handler for forwarded messages (register BEFORE ConversationHandlers)
     # This allows forwarding messages to work from any state
