@@ -39,7 +39,8 @@ import asyncio
 import uuid
 from functools import wraps
 from flask import Flask, request, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BufferedInputFile
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.input_file import BufferedInputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from telegram.error import TimedOut, NetworkError, RetryAfter
 from telegram.request import HTTPXRequest
