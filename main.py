@@ -40,10 +40,10 @@ import uuid
 from functools import wraps
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.input_file import BufferedInputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
 from telegram.error import TimedOut, NetworkError, RetryAfter
 from telegram.request import HTTPXRequest
+import io
 
 from supabase import create_client, Client
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -2481,7 +2481,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                 # Try to download and send as file
                 photo_bytes = await download_photo_from_url(photo_url)
                 if photo_bytes:
-                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    photo_file = io.BytesIO(photo_bytes)
                     sent_message = await update.message.reply_photo(
                         photo=photo_file,
                         caption=message,
@@ -2753,7 +2753,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
                 # Try to download and send as file
                 photo_bytes = await download_photo_from_url(photo_url)
                 if photo_bytes:
-                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    photo_file = io.BytesIO(photo_bytes)
                     sent_message = await update.message.reply_photo(
                         photo=photo_file,
                         caption=message,
@@ -3011,7 +3011,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Try to download and send as file
                 photo_bytes = await download_photo_from_url(photo_url)
                 if photo_bytes:
-                    photo_file = BufferedInputFile(photo_bytes, filename="photo.jpg")
+                    photo_file = io.BytesIO(photo_bytes)
                     await update.message.reply_photo(
                         photo=photo_file,
                         caption=message,
