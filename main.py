@@ -475,25 +475,20 @@ def detect_search_type(value: str) -> tuple[str, str]:
     """
     Automatically detect the type of search value.
     Returns: (field_type, normalized_value)
-    field_type can be: 'facebook_link', 'telegram_id', 'telegram_user', 'fullname', 'unknown'
+    field_type can be: 'telegram_id', 'telegram_user', 'fullname', 'unknown'
     """
     if not value:
         return 'unknown', ''
     
     value_stripped = value.strip()
     
-    # 1. Check for Facebook link (most specific pattern)
-    is_valid_fb, _, fb_normalized = validate_facebook_link(value_stripped)
-    if is_valid_fb:
-        return 'facebook_link', fb_normalized
-    
-    # 2. Check for Telegram ID (only digits, minimum 5 digits for reliability)
+    # 1. Check for Telegram ID (only digits, minimum 5 digits for reliability)
     if value_stripped.isdigit() and len(value_stripped) >= 5:
         normalized = normalize_telegram_id(value_stripped)
         if normalized:
             return 'telegram_id', normalized
     
-    # 3. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
+    # 2. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
     # Remove @ if present
     username_candidate = value_stripped.replace('@', '').strip()
     # Check if it contains only allowed characters for Telegram username
@@ -505,7 +500,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
             if is_valid_tg:
                 return 'telegram_user', tg_normalized
     
-    # 4. Check for fullname (contains spaces or letters, not just digits)
+    # 3. Check for fullname (contains spaces or letters, not just digits)
     # If it contains spaces or has letters (not just digits), it's likely a name
     if ' ' in value_stripped or any(c.isalpha() for c in value_stripped):
         # Normalize text field
@@ -513,7 +508,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
         if normalized and len(normalized) >= 3:  # Minimum 3 characters for name search
             return 'fullname', normalized
     
-    # 5. Unknown - cannot determine type
+    # 4. Unknown - cannot determine type
     return 'unknown', value_stripped
 
 def get_field_format_requirements(field_name: str) -> str:
@@ -678,7 +673,6 @@ def get_check_menu_keyboard():
     """Create check menu keyboard with all search options"""
     keyboard = [
         [InlineKeyboardButton("📱 Имя пользователя Telegram", callback_data="check_telegram")],
-        [InlineKeyboardButton("🔗 Facebook Ссылка", callback_data="check_fb_link")],
         [InlineKeyboardButton("🆔 Telegram ID", callback_data="check_telegram_id")],
         [InlineKeyboardButton("👤 Клиент", callback_data="check_fullname")],
         [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]
@@ -828,12 +822,44 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
     
-    # Check if user is in another active ConversationHandler
+    # PRIORITY CHECK: Check for indicators of other active flows BEFORE checking add flow
+    # These checks use context.user_data keys that are set during tag/edit flows
+    
+    # Check for tag flow indicators (even if current_state is not set correctly)
+    tag_manager_name = context.user_data.get('tag_manager_name')
+    tag_new_tag = context.user_data.get('tag_new_tag')
+    if tag_manager_name or tag_new_tag:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow "
+            f"(tag_manager_name={bool(tag_manager_name)}, tag_new_tag={bool(tag_new_tag)}), "
+            "not intercepting message"
+        )
+        return None
+    
+    # Check for edit flow indicators (even if current_state is not set correctly)
+    editing_lead_id = context.user_data.get('editing_lead_id')
+    if editing_lead_id:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in edit flow "
+            f"(editing_lead_id={editing_lead_id}), not intercepting message"
+        )
+        return None
+    
+    # Check if user is in another active ConversationHandler by state
     # Tag flow states
     tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
     if current_state in tag_states:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow (state={current_state}), "
+            "not intercepting message"
+        )
+        return None
+    
+    # Edit flow states
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    if current_state in edit_states:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in edit flow (state={current_state}), "
             "not intercepting message"
         )
         return None
@@ -863,12 +889,37 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     user_id = update.effective_user.id
     
+    # Log message attributes for debugging
+    has_photo = bool(update.message.photo)
+    has_text = bool(update.message.text)
+    has_caption = bool(update.message.caption)
+    forward_from = update.message.forward_from
+    forward_from_chat = update.message.forward_from_chat
+    forward_sender_name = update.message.forward_sender_name
+    
+    logger.info(
+        f"[FORWARD_GLOBAL] Message from user {user_id}: "
+        f"photo={has_photo}, text={has_text}, caption={has_caption}, "
+        f"forward_from={bool(forward_from)}, forward_from_chat={bool(forward_from_chat)}, "
+        f"forward_sender_name={bool(forward_sender_name)}"
+    )
+    
     # Check if message is forwarded
-    is_forwarded = (update.message.forward_from is not None or 
-                    update.message.forward_from_chat is not None or 
-                    update.message.forward_sender_name is not None)
+    # Include photo-only messages if they have forwarding indicators
+    is_forwarded = (forward_from is not None or 
+                    forward_from_chat is not None or 
+                    forward_sender_name is not None)
+    
+    # Special case: if message has photo but no text/caption, and has forwarding indicators,
+    # treat it as forwarded even if forward_from is None (privacy settings)
+    if not is_forwarded and has_photo and not has_text and not has_caption:
+        # Check if there are any forwarding indicators (even if forward_from is None)
+        if forward_from_chat is not None or forward_sender_name is not None:
+            is_forwarded = True
+            logger.info(f"[FORWARD_GLOBAL] Photo-only forwarded message detected (privacy settings hide forward_from)")
     
     if not is_forwarded:
+        logger.info(f"[FORWARD_GLOBAL] Not a forwarded message, skipping")
         return None  # Not a forwarded message, let other handlers process it
     
     logger.info(f"[FORWARD_GLOBAL] Forwarded message detected from user {user_id}")
@@ -923,12 +974,36 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['current_state'] = ADD_FULLNAME
         context.user_data['add_step'] = 0
         
+        # Extract photo if available (even if forward_from is None)
+        extracted_info = []
+        if update.message.photo:
+            # Get largest photo (last in the list)
+            largest_photo = update.message.photo[-1]
+            photo_file_id = largest_photo.file_id
+            user_data_store[user_id]['photo_file_id'] = photo_file_id
+            extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
+            logger.info(f"[FORWARD_GLOBAL] Extracted photo_file_id (privacy mode) for user {user_id}: {photo_file_id}")
+        
+        # Parse caption for Facebook link (if available)
+        if update.message.caption:
+            caption = update.message.caption.strip()
+            is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
+            if is_valid_fb:
+                user_data_store[user_id]['facebook_link'] = fb_normalized
+                extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from caption (privacy mode): {fb_normalized}")
+        
+        # Show extracted info if any
+        info_text = ""
+        if extracted_info:
+            info_text = "\n\n✅ Извлечено из сообщения:\n" + "\n".join(extracted_info) + "\n"
+        
         field_label = get_field_label('fullname')
         _, _, current_step, total_steps = get_next_add_field('')
         message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:"
         
         await update.message.reply_text(
-            "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n" + message,
+            "⚠️ Данные отправителя недоступны из-за настроек приватности." + info_text + "\n" + message,
             reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
             parse_mode='HTML'
         )
@@ -996,6 +1071,15 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
                 extracted_data['facebook_link'] = fb_normalized
                 extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
                 logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from message text: {fb_normalized}")
+        
+        # Parse caption for Facebook link (if available, and text was not processed)
+        if update.message.caption and 'facebook_link' not in extracted_data:
+            caption = update.message.caption.strip()
+            is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
+            if is_valid_fb:
+                extracted_data['facebook_link'] = fb_normalized
+                extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+                logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from caption: {fb_normalized}")
         
         # Extract photo if available
         if update.message.photo:
@@ -1127,6 +1211,13 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             del user_data_store[user_id]
         if user_id in user_data_store_access_time:
             del user_data_store_access_time[user_id]
+        # Explicitly clear add flow related keys from context.user_data
+        if 'current_field' in context.user_data:
+            del context.user_data['current_field']
+        if 'current_state' in context.user_data:
+            del context.user_data['current_state']
+        if 'add_step' in context.user_data:
+            del context.user_data['add_step']
         logger.info(f"[TAG] State and user_data_store cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
         
         # Get Supabase client
@@ -1225,6 +1316,13 @@ async def tag_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             del user_data_store[user_id]
         if user_id in user_data_store_access_time:
             del user_data_store_access_time[user_id]
+        # Explicitly clear add flow related keys from context.user_data
+        if 'current_field' in context.user_data:
+            del context.user_data['current_field']
+        if 'current_state' in context.user_data:
+            del context.user_data['current_state']
+        if 'add_step' in context.user_data:
+            del context.user_data['add_step']
         
         # Extract index from callback_data
         # Format: "tag_mgr_{index}"
@@ -1401,7 +1499,6 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             query.edit_message_text,
             text="✅ Введите данные для поиска:\n\n"
                  "Можно ввести:\n"
-                 "• Facebook ссылку\n"
                  "• Telegram username\n"
                  "• Telegram ID\n"
                  "• Имя клиента",
@@ -1414,7 +1511,6 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
                 query.message.reply_text,
                 text="✅ Введите данные для поиска:\n\n"
                      "Можно ввести:\n"
-                     "• Facebook ссылку\n"
                      "• Telegram username\n"
                      "• Telegram ID\n"
                      "• Имя клиента",
@@ -1881,7 +1977,7 @@ async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT_TYPE, search_value: str):
     """
     Search across multiple fields simultaneously using OR conditions.
-    Searches in: facebook_link, telegram_user, telegram_id, fullname
+    Searches in: telegram_user, telegram_id, fullname
     """
     if not update.message:
         logger.error(f"[MULTI_FIELD_SEARCH] update.message is None")
@@ -1902,15 +1998,9 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
     
     try:
         # Try to normalize values for different field types
-        normalized_fb = None
         normalized_tg_user = None
         normalized_tg_id = None
         normalized_fullname = None
-        
-        # Try Facebook link normalization
-        is_valid_fb, _, fb_normalized = validate_facebook_link(search_value)
-        if is_valid_fb:
-            normalized_fb = fb_normalized
         
         # Try Telegram username normalization
         is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
@@ -1933,18 +2023,6 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         
         all_results = []
         seen_ids = set()
-        
-        # Search in facebook_link (exact match)
-        if normalized_fb:
-            try:
-                response = client.table(TABLE_NAME).select("*").eq("facebook_link", normalized_fb).limit(50).execute()
-                if response.data:
-                    for item in response.data:
-                        if item.get('id') not in seen_ids:
-                            all_results.append(item)
-                            seen_ids.add(item.get('id'))
-            except Exception as e:
-                logger.warning(f"[MULTI_FIELD_SEARCH] Error searching facebook_link: {e}")
         
         # Search in telegram_user (exact match)
         if normalized_tg_user:
@@ -2652,11 +2730,7 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[SMART_CHECK] Detected type: '{field_type}' for value: '{search_value}' (normalized: '{normalized_value}')")
     
     # Route to appropriate search function based on detected type
-    if field_type == 'facebook_link':
-        # Use existing check_by_field for Facebook link
-        return await check_by_field(update, context, "facebook_link", "Facebook Ссылка", SMART_CHECK_INPUT)
-    
-    elif field_type == 'telegram_id':
+    if field_type == 'telegram_id':
         # Use existing check_by_field for Telegram ID
         return await check_by_field(update, context, "telegram_id", "Telegram ID", SMART_CHECK_INPUT)
     
