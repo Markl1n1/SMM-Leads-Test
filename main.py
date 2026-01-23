@@ -1363,7 +1363,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
 async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /tag command - request PIN code before showing manager list"""
+    """Handle /tag command - request PIN code before showing manager list
+    This command ALWAYS interrupts any current process and starts its own flow."""
     try:
         user_id = update.effective_user.id
         from_user = update.effective_user
@@ -1374,21 +1375,19 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"context_keys_before_clear={list(context.user_data.keys()) if context.user_data else []}"
         )
         
-        # Clear conversation state AND user_data_store to prevent interference from add flow
+        # ALWAYS clear all conversation states to interrupt any current process
         clear_all_conversation_state(context, user_id)
         # Also clear user_data_store to prevent check_add_state_entry from intercepting messages
         if user_id in user_data_store:
             del user_data_store[user_id]
         if user_id in user_data_store_access_time:
             del user_data_store_access_time[user_id]
-        # Explicitly clear add flow related keys from context.user_data
-        if 'current_field' in context.user_data:
-            del context.user_data['current_field']
-        if 'current_state' in context.user_data:
-            del context.user_data['current_state']
-        if 'add_step' in context.user_data:
-            del context.user_data['add_step']
-        logger.info(f"[TAG] State and user_data_store cleared for user {user_id}, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
+        # Explicitly clear ALL flow related keys from context.user_data
+        for key in ['current_field', 'current_state', 'add_step', 'editing_lead_id', 
+                    'tag_manager_name', 'tag_new_tag', 'pin_attempts']:
+            context.user_data.pop(key, None)
+        
+        logger.info(f"[TAG] All states cleared for user {user_id}, starting tag flow, context_keys_after_clear={list(context.user_data.keys()) if context.user_data else []}")
         
         # Reset PIN attempt counter when starting new tag flow
         context.user_data['pin_attempts'] = 0
@@ -1948,15 +1947,16 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
     return ConversationHandler.END
 
 async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle commands sent during ConversationHandler (except /q, /start, and /skip)"""
+    """Handle commands sent during ConversationHandler (except /q, /start, /skip, and /tag)"""
     if not update.message or not update.message.text:
         return
     
     command = update.message.text.strip().split()[0] if update.message.text else ""
     
-    # CRITICAL: Never intercept /start or /q - they must be handled by their dedicated handlers
+    # CRITICAL: Never intercept /start, /q, /skip, or /tag - they must be handled by their dedicated handlers
+    # /tag should always interrupt current process and start its own flow
     # This prevents issues when ConversationHandler is in a stale state after deploy
-    if command in ["/q", "/start", "/skip"]:
+    if command in ["/q", "/start", "/skip", "/tag"]:
         logger.warning(f"[UNKNOWN_CMD] Ignoring {command} - should be handled by dedicated handler. Context keys: {list(context.user_data.keys()) if context.user_data else 'empty'}")
         return None  # Return None to let other handlers process it
     
@@ -5741,8 +5741,8 @@ def create_telegram_app():
     telegram_app.add_handler(CallbackQueryHandler(button_callback, pattern="^(main_menu|add_menu|add_new)$"))
     
     # Add handler for unknown commands during conversations (must be after command handlers)
-    # Exclude /start, /q, and /skip (skip is handled by ConversationHandlers)
-    telegram_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex("^(/start|/q|/skip)$"), unknown_command_handler))
+    # Exclude /start, /q, /skip, and /tag (skip is handled by ConversationHandlers, tag should interrupt any process)
+    telegram_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex("^(/start|/q|/skip|/tag)$"), unknown_command_handler))
     
     # Add global fallback for unknown callback queries (must be last, after all ConversationHandlers)
     telegram_app.add_handler(CallbackQueryHandler(unknown_callback_handler))

@@ -34,15 +34,17 @@
             padding-bottom: 10px;
             margin-bottom: 30px;
             font-size: 28px;
+            text-align: center;
         }
         
         /* Tabs Styles */
         .tabs {
             display: flex;
-            flex-wrap: wrap;
+            flex-wrap: nowrap;
             border-bottom: 2px solid #e0e0e0;
             margin-bottom: 30px;
             gap: 5px;
+            overflow-x: auto;
         }
         
         .tab-button {
@@ -190,6 +192,12 @@
             color: #2c3e50;
         }
         
+        @media (max-width: 900px) {
+            .tabs {
+                flex-wrap: wrap;
+            }
+        }
+        
         @media (max-width: 600px) {
             body {
                 padding: 10px;
@@ -209,6 +217,7 @@
             
             .tabs {
                 flex-direction: column;
+                flex-wrap: nowrap;
             }
             
             .tab-button {
@@ -431,6 +440,12 @@
                 <h3><code>/q</code></h3>
                 <p>Возврат в главное меню (работает из любого состояния)</p>
                 <div class="tip">Используйте если что-то зависло, не нажимается, не выводит данные (и попробуйте снова).</div>
+            </div>
+            
+            <div class="step">
+                <h3><code>/help</code></h3>
+                <p>Показать справку и список доступных команд</p>
+                <div class="tip">Используйте эту команду, если забыли как работать с ботом или хотите увидеть все доступные команды.</div>
             </div>
         </div>
         
