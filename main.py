@@ -822,15 +822,34 @@ def log_conversation_state(user_id: int, context: ContextTypes.DEFAULT_TYPE, pre
         logger.error(f"{prefix} Failed to log conversation state for user_id={user_id}: {e}", exc_info=True)
 
 async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check if user has add state initialized (from forwarded message) and enter ConversationHandler"""
+    """Entry point for add flow when it was initialized by forwarded message.
+
+    If user already has add state (set by handle_forwarded_message or add_field_input),
+    we immediately delegate this *same* update to the proper handler so the user
+    doesn't have to send the message twice.
+    """
     if not update.message:
         return None
     
     user_id = update.effective_user.id
-    # Check if user has add state initialized
-    if user_id in user_data_store and context.user_data.get('current_state') == ADD_FULLNAME:
-        # User has add state initialized, enter ConversationHandler
-        return ADD_FULLNAME
+    current_state = context.user_data.get('current_state')
+    
+    # Conversation states that belong to the add flow
+    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    
+    # If user has add data and current_state points to add flow – handle this update there
+    if user_id in user_data_store and current_state in add_states:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} has existing add state {current_state}, "
+            "delegating update to add flow handler"
+        )
+        # If we're already at review stage, just show review
+        if current_state == ADD_REVIEW:
+            return await show_add_review(update, context)
+        # For all other add states, process input via add_field_input
+        return await add_field_input(update, context)
+    
+    # No pre-initialized add state – let other handlers process update
     return None
 
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
