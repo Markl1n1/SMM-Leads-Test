@@ -873,16 +873,46 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     logger.info(f"[FORWARD_GLOBAL] Forwarded message detected from user {user_id}")
     
+    # Check if user is in another active ConversationHandler (edit, tag, or add flow)
+    current_state = context.user_data.get('current_state')
+    
+    # Edit flow states
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    # Tag flow states
+    tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
+    # Add flow states
+    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    
+    # Check if user is in edit flow
+    if current_state in edit_states or context.user_data.get('editing_lead_id'):
+        logger.info(f"[FORWARD_GLOBAL] User {user_id} is in edit flow (state={current_state}), ignoring forwarded message")
+        await update.message.reply_text(
+            "⚠️ Вы находитесь в процессе редактирования лида.\n\n"
+            "Завершите редактирование или отмените его, прежде чем добавлять новый лид.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return None
+    
+    # Check if user is in tag flow
+    if current_state in tag_states:
+        logger.info(f"[FORWARD_GLOBAL] User {user_id} is in tag flow (state={current_state}), ignoring forwarded message")
+        await update.message.reply_text(
+            "⚠️ Вы находитесь в процессе изменения тега менеджера.\n\n"
+            "Завершите операцию или отмените её, прежде чем добавлять новый лид.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return None
+    
     # Check if user is already in the process of adding a lead
     # If yes, let the existing add_field_input handle it
     if user_id in user_data_store:
-        # Check if user is in add flow (has current_field or current_state)
-        if context.user_data.get('current_field') or context.user_data.get('current_state'):
+        # Check if user is in add flow (has current_field or current_state in add_states)
+        if context.user_data.get('current_field') or current_state in add_states:
             # User is in add flow, let add_field_input handle it
             logger.info(f"[FORWARD_GLOBAL] User {user_id} is already in add flow, letting add_field_input handle it")
             return None
     
-    # User is not in add flow - start new add flow from forwarded message
+    # User is not in any active flow - start new add flow from forwarded message
     # Check if forward_from is available (privacy settings may hide it)
     if update.message.forward_from is None:
         # Privacy settings hide the sender info - start normal flow
