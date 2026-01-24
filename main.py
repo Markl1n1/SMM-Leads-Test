@@ -480,7 +480,7 @@ def validate_facebook_link(link: str) -> tuple[bool, str, str]:
 def validate_telegram_name(tg_name: str) -> tuple[bool, str, str]:
     """Validate Telegram name: remove @ if present, remove all spaces, check not empty"""
     if not tg_name:
-        return False, "Имя пользователя Telegram не может быть пустым", ""
+        return False, "Тег Telegram не может быть пустым", ""
     # Remove all spaces (not just trim)
     normalized = tg_name.replace(' ', '').replace('\t', '').replace('\n', '')
     # Remove all @ symbols (handle multiple @)
@@ -488,7 +488,7 @@ def validate_telegram_name(tg_name: str) -> tuple[bool, str, str]:
     # Trim any remaining whitespace
     normalized = normalized.strip()
     if not normalized:
-        return False, "Имя пользователя Telegram не может быть пустым", ""
+        return False, "Тег Telegram не может быть пустым", ""
     return True, "", normalized
 
 def validate_telegram_id(tg_id: str) -> tuple[bool, str, str]:
@@ -724,7 +724,7 @@ def get_main_menu_keyboard():
 def get_check_menu_keyboard():
     """Create check menu keyboard with all search options"""
     keyboard = [
-        [InlineKeyboardButton("📱 Имя пользователя Telegram", callback_data="check_telegram")],
+        [InlineKeyboardButton("📱 Тег Telegram", callback_data="check_telegram")],
         [InlineKeyboardButton("🆔 Telegram ID", callback_data="check_telegram_id")],
         [InlineKeyboardButton("👤 Клиент", callback_data="check_fullname")],
         [InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]
@@ -1253,9 +1253,20 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             return ADD_REVIEW
     
     # Check if user is in check flow (SMART_CHECK_INPUT state)
-    if current_state == SMART_CHECK_INPUT:
+    # Проверяем как current_state, так и наличие активного ConversationHandler для check flow
+    # ConversationHandler для check flow называется smart_check_conv
+    has_smart_check_conv = any(
+        key.startswith('_conversation_') 
+        for key in (context.user_data.keys() if context.user_data else [])
+    ) if context.user_data else False
+
+    is_in_check_flow = (
+        current_state == SMART_CHECK_INPUT or
+        (has_smart_check_conv and user_id not in user_data_store)  # Если ConversationHandler активен для check, но нет add flow
+    )
+    if is_in_check_flow:
         # User is in check flow - extract data and check immediately
-        logger.info(f"[FORWARD_GLOBAL] User {user_id} is in check flow, extracting data and checking immediately")
+        logger.info(f"[FORWARD_GLOBAL] User {user_id} is in check flow (state={current_state}, has_conv={has_smart_check_conv}), extracting data and checking immediately")
         
         # Check if forward_from is available
         if update.message.forward_from is None:
@@ -1464,8 +1475,13 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Check if user is already in add flow
     # If yes, let ConversationHandler handle it (it has photo handler in states)
-    if user_id in user_data_store and current_state in add_states:
-        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow, letting ConversationHandler handle photo")
+    # Проверяем как current_state, так и current_field для более надежной проверки
+    is_in_add_flow = (
+        (user_id in user_data_store and current_state in add_states) or
+        (user_id in user_data_store and context.user_data.get('current_field') in ['fullname', 'facebook_link', 'telegram_name', 'telegram_id', 'review'])
+    )
+    if is_in_add_flow:
+        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow (state={current_state}, field={context.user_data.get('current_field')}), letting ConversationHandler handle photo")
         return None
     
     # Extract photo
@@ -2030,6 +2046,9 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             logger.error("check_menu_callback: query.message is None")
             return ConversationHandler.END
     
+    # Установить current_state для корректной работы handle_forwarded_message
+    context.user_data['current_state'] = SMART_CHECK_INPUT
+    
     return SMART_CHECK_INPUT
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2416,7 +2435,7 @@ async def check_telegram_callback(update: Update, context: ContextTypes.DEFAULT_
     
     try:
         await query.edit_message_text(
-            "📱 Введите Имя пользователя Telegram для проверки:",
+            "📱 Введите Тег Telegram для проверки:",
             reply_markup=get_check_back_keyboard()
         )
     except Exception as e:
@@ -2424,7 +2443,7 @@ async def check_telegram_callback(update: Update, context: ContextTypes.DEFAULT_
         logger.warning(f"Could not edit message in check_telegram_callback: {e}")
         if query.message:
             await query.message.reply_text(
-                "📱 Введите Имя пользователя Telegram для проверки:",
+                "📱 Введите Тег Telegram для проверки:",
                 reply_markup=get_check_back_keyboard()
             )
         else:
@@ -2659,10 +2678,10 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         field_labels = {
             'fullname': 'Клиент',
             'facebook_link': 'Facebook Ссылка',
-            'telegram_user': 'Имя пользователя Telegram',
+            'telegram_user': 'Тег Telegram',
             'telegram_id': 'Telegram ID',
-            'manager_name': 'Добавил',
-            'manager_tag': 'Тег',
+            'manager_name': 'Агент',
+            'manager_tag': 'Тег Агента',
             'photo_url': 'Фото',
             'created_at': 'Дата'
         }
@@ -2923,10 +2942,10 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
         field_labels = {
             'fullname': 'Клиент',
             'facebook_link': 'Facebook Ссылка',
-            'telegram_user': 'Имя пользователя Telegram',  # Changed from telegram_name to telegram_user
+            'telegram_user': 'Тег Telegram',  # Changed from telegram_name to telegram_user
             'telegram_id': 'Telegram ID',
-            'manager_name': 'Добавил',
-            'manager_tag': 'Тег',
+            'manager_name': 'Агент',
+            'manager_tag': 'Тег Агента',
             'photo_url': 'Фото',
             'created_at': 'Дата'
         }
@@ -3174,10 +3193,10 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         field_labels = {
             'fullname': 'Клиент',
             'facebook_link': 'Facebook Ссылка',
-            'telegram_user': 'Имя пользователя Telegram',  # Changed from telegram_name to telegram_user
+            'telegram_user': 'Тег Telegram',  # Changed from telegram_name to telegram_user
             'telegram_id': 'Telegram ID',
-            'manager_name': 'Добавил',
-            'manager_tag': 'Тег',
+            'manager_name': 'Агент',
+            'manager_tag': 'Тег Агента',
             'photo_url': 'Фото',
             'created_at': 'Дата'
         }
@@ -3357,7 +3376,7 @@ async def check_telegram_input(update: Update, context: ContextTypes.DEFAULT_TYP
     if not update.message:
         logger.error(f"[CHECK_TELEGRAM_INPUT] update.message is None. Update type: {type(update)}, has callback_query: {update.callback_query is not None}")
         return ConversationHandler.END
-    return await check_by_field(update, context, "telegram_user", "Имя пользователя Telegram", CHECK_BY_TELEGRAM)
+    return await check_by_field(update, context, "telegram_user", "Тег Telegram", CHECK_BY_TELEGRAM)
 
 async def check_fb_link_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle Facebook link input for checking"""
@@ -3452,7 +3471,7 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif field_type == 'telegram_user':
         # Use existing check_by_field for Telegram username
-        return await check_by_field(update, context, "telegram_user", "Имя пользователя Telegram", SMART_CHECK_INPUT)
+        return await check_by_field(update, context, "telegram_user", "Тег Telegram", SMART_CHECK_INPUT)
     
     elif field_type == 'fullname':
         # Use existing check_by_fullname for name search
@@ -4230,7 +4249,7 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field_labels = {
         'fullname': 'Имя Фамилия',
         'facebook_link': 'Facebook Ссылка',
-        'telegram_name': 'Имя пользователя Telegram',
+        'telegram_name': 'Тег Telegram',
         'telegram_id': 'Telegram ID'
     }
     
@@ -4281,27 +4300,29 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photo messages during add flow - save photo and continue"""
     if not update.message:
+        logger.warning("[PHOTO_DURING_ADD] update.message is None")
         return ConversationHandler.END
     
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
     
-    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state})")
+    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state}, field={context.user_data.get('current_field')})")
+    
+    # Проверить, что user_data_store существует
+    if user_id not in user_data_store:
+        logger.warning(f"[PHOTO_DURING_ADD] user_data_store does not exist for user {user_id}, creating it")
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
     
     # Extract photo
     largest_photo = update.message.photo[-1]
     photo_file_id = largest_photo.file_id
     
-    # Ensure user_data_store exists
-    if user_id not in user_data_store:
-        user_data_store[user_id] = {}
-        user_data_store_access_time[user_id] = time.time()
-    
     # Save photo to user_data_store
     user_data_store[user_id]['photo_file_id'] = photo_file_id
     user_data_store_access_time[user_id] = time.time()
     
-    logger.info(f"[PHOTO_DURING_ADD] Saved photo_file_id={photo_file_id} for user {user_id}")
+    logger.info(f"[PHOTO_DURING_ADD] Saved photo_file_id={photo_file_id} for user {user_id} in user_data_store")
     
     # Notify user that photo was saved
     await update.message.reply_text(
@@ -4471,10 +4492,10 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
         field_labels = {
             'fullname': 'Клиент',
             'facebook_link': 'Facebook Ссылка',
-            'telegram_user': 'Имя пользователя Telegram',
+            'telegram_user': 'Тег Telegram',
             'telegram_id': 'Telegram ID',
-            'manager_name': 'Добавил',
-            'manager_tag': 'Тег',
+            'manager_name': 'Агент',
+            'manager_tag': 'Тег Агента',
             'photo_url': 'Фото',
             'created_at': 'Дата'
         }
@@ -4672,7 +4693,7 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
 # Field labels for uniqueness check messages (Russian)
 UNIQUENESS_FIELD_LABELS = {
     'facebook_link': 'Facebook Ссылка',
-    'telegram_name': 'Имя пользователя Telegram',
+    'telegram_name': 'Тег Telegram',
     'telegram_id': 'Telegram ID'
 }
 
@@ -5156,7 +5177,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей:\n\n"
             "• Facebook Ссылка\n"
-            "• Имя пользователя Telegram\n"
+            "• Тег Telegram\n"
             "• Telegram ID\n\n"
             "ℹ️ Начнем с первого опционального поля:",
             reply_markup=get_main_menu_keyboard(),
@@ -5293,6 +5314,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[NEW_LEAD_SAVED] Lead ID: {lead_id}")
             
             # Try to upload photo if we extracted it earlier
+            logger.info(f"[ADD_SAVE] Checking for photo in user_data: keys={list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
             user_photo_file_id = user_data.get('photo_file_id')
             if lead_id:
                 if user_photo_file_id:
@@ -5308,7 +5330,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     else:
                         logger.warning(f"[PHOTO] Photo upload failed (returned None) for lead {lead_id}, file_id={user_photo_file_id}")
                 else:
-                    logger.info(f"[PHOTO] No photo_file_id in user_data for lead {lead_id}, skipping photo upload")
+                    logger.warning(f"[PHOTO] No photo_file_id in user_data for lead {lead_id}, user_data keys: {list(user_data.keys())}")
             
             # Log all fields with their values
             field_labels = {
@@ -5316,7 +5338,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'manager_name': 'Стейдж менеджера (manager_name)',
                 'manager_tag': 'Тег менеджера (manager_tag)',
                 'facebook_link': 'Facebook Ссылка (facebook_link)',
-                'telegram_user': 'Имя пользователя Telegram (telegram_user)',
+                'telegram_user': 'Тег Telegram (telegram_user)',
                 'telegram_id': 'Telegram ID (telegram_id)',
                 'photo_url': 'Фото (photo_url)',
                 'created_at': 'Дата создания (created_at)'
@@ -5338,7 +5360,7 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             field_labels = {
                 'fullname': 'Имя Фамилия',
                 'facebook_link': 'Facebook Ссылка',
-                'telegram_name': 'Имя пользователя Telegram',
+                'telegram_name': 'Тег Telegram',
                 'telegram_id': 'Telegram ID'
             }
             
@@ -5698,7 +5720,7 @@ def get_edit_field_keyboard(user_id: int, original_data: dict = None):
     telegram_id_status = get_status('telegram_id')
     
     keyboard.append([InlineKeyboardButton(f"{fb_link_status} Facebook Ссылка", callback_data="edit_field_fb_link")])
-    keyboard.append([InlineKeyboardButton(f"{telegram_name_status} Имя пользователя Telegram", callback_data="edit_field_telegram_name")])
+    keyboard.append([InlineKeyboardButton(f"{telegram_name_status} Тег Telegram", callback_data="edit_field_telegram_name")])
     keyboard.append([InlineKeyboardButton(f"{telegram_id_status} Telegram ID", callback_data="edit_field_telegram_id")])
     
     # Action buttons
@@ -5962,7 +5984,7 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not has_identifier:
         await query.edit_message_text(
             "❌ Ошибка: Необходимо указать минимум одно из полей:\n"
-            "Facebook Ссылка, Имя пользователя Telegram или Telegram ID!\n\n"
+            "Facebook Ссылка, Тег Telegram или Telegram ID!\n\n"
             "Выберите поле для редактирования:",
             reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
         )
@@ -6109,7 +6131,7 @@ async def edit_field_fb_link_callback(update: Update, context: ContextTypes.DEFA
     return await edit_field_callback(update, context, 'facebook_link', 'Facebook Ссылка', EDIT_FB_LINK)
 
 async def edit_field_telegram_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'telegram_name', 'Имя пользователя Telegram', EDIT_TELEGRAM_NAME)
+    return await edit_field_callback(update, context, 'telegram_name', 'Тег Telegram', EDIT_TELEGRAM_NAME)
 
 async def edit_field_telegram_id_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await edit_field_callback(update, context, 'telegram_id', 'Telegram ID', EDIT_TELEGRAM_ID)
