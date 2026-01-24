@@ -1008,7 +1008,7 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
 async def check_add_state_entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Entry point for add flow via callback query when state was initialized by forwarded message.
     
-    This allows callback queries (like add_skip, add_back) to work even when
+    This allows callback queries (like add_skip, add_back, add_save) to work even when
     the ConversationHandler wasn't explicitly activated via add_new button.
     """
     if not update.callback_query:
@@ -1053,6 +1053,10 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
         elif callback_data == "add_cancel":
             # Delegate to add_cancel_callback
             result = await add_cancel_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_save":
+            # Delegate to add_save_callback
+            result = await add_save_callback(update, context)
             return result if result is not None else current_state
         
         # If callback doesn't match, just activate ConversationHandler
@@ -2158,8 +2162,8 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
             # Return None to let ConversationHandler process it
             return None
         
-        # Special handling for add_skip, add_back, add_cancel - try to activate ConversationHandler
-        if callback_data in ["add_skip", "add_back", "add_cancel"]:
+        # Special handling for add_skip, add_back, add_cancel, add_save - try to activate ConversationHandler
+        if callback_data in ["add_skip", "add_back", "add_cancel", "add_save"]:
             logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for add state for user {user_id}")
             # Check if user has add state initialized
             current_state = context.user_data.get('current_state')
@@ -6397,8 +6401,8 @@ def create_telegram_app():
             # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
             MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
             # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
-            # This handles callbacks like add_skip, add_back when flow was started via forwarded message
-            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel)$")
+            # This handles callbacks like add_skip, add_back, add_save when flow was started via forwarded message
+            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel|add_save)$")
         ],
         states={
             ADD_FULLNAME: [
