@@ -4219,14 +4219,36 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Работаем как с message, так и с callback_query
         # Always use HTML when progress indicator is present
         if update.callback_query:
-            await update.callback_query.edit_message_text(
-                message,
-                reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
-                parse_mode='HTML'
-            )
-            # Save message ID for cleanup (edit_message_text doesn't return new message, use existing)
-            if update.callback_query.message:
-                await save_add_message(update, context, update.callback_query.message.message_id)
+            # Проверить, что сообщение не содержит фото
+            if update.callback_query.message and update.callback_query.message.photo:
+                # Если сообщение содержит фото, отправить новое сообщение вместо редактирования
+                sent_message = await update.callback_query.message.reply_text(
+                    message,
+                    reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
+                    parse_mode='HTML'
+                )
+                await save_add_message(update, context, sent_message.message_id)
+            else:
+                # Сообщение не содержит фото, можно редактировать
+                try:
+                    await update.callback_query.edit_message_text(
+                        message,
+                        reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
+                        parse_mode='HTML'
+                    )
+                    # Save message ID for cleanup (edit_message_text doesn't return new message, use existing)
+                    if update.callback_query.message:
+                        await save_add_message(update, context, update.callback_query.message.message_id)
+                except Exception as e:
+                    # Если редактирование не удалось (например, сообщение содержит фото), отправить новое
+                    logger.warning(f"[ADD_FIELD] Failed to edit message, sending new one: {e}")
+                    if update.callback_query.message:
+                        sent_message = await update.callback_query.message.reply_text(
+                            message,
+                            reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
+                            parse_mode='HTML'
+                        )
+                        await save_add_message(update, context, sent_message.message_id)
         elif update.message:
             sent_message = await retry_telegram_api(
                 update.message.reply_text,
@@ -4281,14 +4303,36 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Работаем как с message, так и с callback_query
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='HTML'
-        )
-        # Save message ID for cleanup
-        if update.callback_query.message:
-            await save_add_message(update, context, update.callback_query.message.message_id)
+        # Проверить, что сообщение не содержит фото
+        if update.callback_query.message and update.callback_query.message.photo:
+            # Если сообщение содержит фото, отправить новое сообщение вместо редактирования
+            sent_message = await update.callback_query.message.reply_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='HTML'
+            )
+            await save_add_message(update, context, sent_message.message_id)
+        else:
+            # Сообщение не содержит фото, можно редактировать
+            try:
+                await update.callback_query.edit_message_text(
+                    message,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                    parse_mode='HTML'
+                )
+                # Save message ID for cleanup
+                if update.callback_query.message:
+                    await save_add_message(update, context, update.callback_query.message.message_id)
+            except Exception as e:
+                # Если редактирование не удалось (например, сообщение содержит фото), отправить новое
+                logger.warning(f"[SHOW_REVIEW] Failed to edit message, sending new one: {e}")
+                if update.callback_query.message:
+                    sent_message = await update.callback_query.message.reply_text(
+                        message,
+                        reply_markup=InlineKeyboardMarkup(keyboard),
+                        parse_mode='HTML'
+                    )
+                    await save_add_message(update, context, sent_message.message_id)
     elif update.message:
         sent_message = await update.message.reply_text(
             message,
