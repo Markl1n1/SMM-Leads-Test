@@ -507,20 +507,25 @@ def detect_search_type(value: str) -> tuple[str, str]:
     """
     Automatically detect the type of search value.
     Returns: (field_type, normalized_value)
-    field_type can be: 'telegram_id', 'telegram_user', 'fullname', 'unknown'
+    field_type can be: 'facebook_link', 'telegram_id', 'telegram_user', 'fullname', 'unknown'
     """
     if not value:
         return 'unknown', ''
     
     value_stripped = value.strip()
     
-    # 1. Check for Telegram ID (only digits, minimum 5 digits for reliability)
+    # 1. Check for Facebook link FIRST (before other checks)
+    is_valid_fb, _, fb_normalized = validate_facebook_link(value_stripped)
+    if is_valid_fb:
+        return 'facebook_link', fb_normalized
+    
+    # 2. Check for Telegram ID (only digits, minimum 5 digits for reliability)
     if value_stripped.isdigit() and len(value_stripped) >= 5:
         normalized = normalize_telegram_id(value_stripped)
         if normalized:
             return 'telegram_id', normalized
     
-    # 2. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
+    # 3. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
     # Remove @ if present
     username_candidate = value_stripped.replace('@', '').strip()
     # Check if it contains only allowed characters for Telegram username
@@ -532,7 +537,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
             if is_valid_tg:
                 return 'telegram_user', tg_normalized
     
-    # 3. Check for fullname (contains spaces or letters, not just digits)
+    # 4. Check for fullname (contains spaces or letters, not just digits)
     # If it contains spaces or has letters (not just digits), it's likely a name
     if ' ' in value_stripped or any(c.isalpha() for c in value_stripped):
         # Normalize text field
@@ -540,7 +545,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
         if normalized and len(normalized) >= 3:  # Minimum 3 characters for name search
             return 'fullname', normalized
     
-    # 4. Unknown - cannot determine type
+    # 5. Unknown - cannot determine type
     return 'unknown', value_stripped
 
 def get_field_format_requirements(field_name: str) -> str:
@@ -610,18 +615,32 @@ def is_field_filled(user_data: dict, field_name: str) -> bool:
     value = user_data.get(field_name)
     return value is not None and value != '' and str(value).strip() != ''
 
-def get_next_add_field(current_field: str) -> tuple[str, int, int, int]:
-    """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)"""
+def get_next_add_field(current_field: str, skip_facebook_link: bool = False) -> tuple[str, int, int, int]:
+    """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)
+    
+    Args:
+        current_field: Current field name
+        skip_facebook_link: If True, skip facebook_link field (for forwarded messages)
+    """
     field_sequence = [
         ('fullname', ADD_FULLNAME),
         ('facebook_link', ADD_FB_LINK),
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
     ]
+    
+    # Filter out facebook_link if skip_facebook_link is True
+    if skip_facebook_link:
+        field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
+    
     total_steps = len(field_sequence) + 1  # +1 for review step
     
     if not current_field:
         return field_sequence[0][0], field_sequence[0][1], 1, total_steps
+    
+    # If current_field is facebook_link and we're skipping it, treat it as if we're at fullname
+    if current_field == 'facebook_link' and skip_facebook_link:
+        current_field = 'fullname'
     
     for i, (field, state) in enumerate(field_sequence):
         if field == current_field:
@@ -1042,6 +1061,74 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
     # No pre-initialized add state – let other handlers process callback
     return None
 
+def extract_data_from_forwarded_message(update: Update) -> tuple[dict, list]:
+    """
+    Extract data from forwarded message.
+    Returns (extracted_data dict, extracted_info list for display)
+    """
+    extracted_data = {}
+    extracted_info = []
+    
+    forward_from = update.message.forward_from
+    
+    if forward_from:
+        # Extract telegram_id
+        if forward_from.id:
+            telegram_id = normalize_telegram_id(str(forward_from.id))
+            if telegram_id:
+                extracted_data['telegram_id'] = telegram_id
+                extracted_info.append(f"• Telegram ID: {telegram_id}")
+                logger.info(f"[EXTRACT_DATA] Extracted telegram_id: {telegram_id}")
+        
+        # Extract telegram_name
+        if forward_from.username:
+            is_valid, _, normalized = validate_telegram_name(forward_from.username)
+            if is_valid:
+                extracted_data['telegram_name'] = normalized
+                extracted_info.append(f"• Username: @{normalized}")
+                logger.info(f"[EXTRACT_DATA] Extracted telegram_name: {normalized}")
+        
+        # Extract fullname
+        first_name = forward_from.first_name or ""
+        last_name = forward_from.last_name or ""
+        if first_name or last_name:
+            if last_name:
+                fullname = f"{first_name} {last_name}".strip()
+            else:
+                fullname = first_name
+            normalized_fullname = normalize_text_field(fullname)
+            if normalized_fullname:
+                extracted_data['fullname'] = normalized_fullname
+                extracted_info.append(f"• Имя: {normalized_fullname}")
+                logger.info(f"[EXTRACT_DATA] Extracted fullname: {normalized_fullname}")
+    
+    # Extract Facebook link from text/caption
+    if update.message.text:
+        text = update.message.text.strip()
+        is_valid_fb, _, fb_normalized = validate_facebook_link(text)
+        if is_valid_fb:
+            extracted_data['facebook_link'] = fb_normalized
+            extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+            logger.info(f"[EXTRACT_DATA] Extracted facebook_link from text: {fb_normalized}")
+    
+    if update.message.caption and 'facebook_link' not in extracted_data:
+        caption = update.message.caption.strip()
+        is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
+        if is_valid_fb:
+            extracted_data['facebook_link'] = fb_normalized
+            extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+            logger.info(f"[EXTRACT_DATA] Extracted facebook_link from caption: {fb_normalized}")
+    
+    # Extract photo
+    if update.message.photo:
+        largest_photo = update.message.photo[-1]
+        photo_file_id = largest_photo.file_id
+        extracted_data['photo_file_id'] = photo_file_id
+        extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
+        logger.info(f"[EXTRACT_DATA] Extracted photo_file_id: {photo_file_id}")
+    
+    return extracted_data, extracted_info
+
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarded messages globally - extract data and start add flow if needed"""
     if not update.message:
@@ -1115,32 +1202,112 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         return None
     
     # Check if user is already in the process of adding a lead
-    # If yes, let the existing add_field_input handle it
+    # If yes, extract data and go directly to Review
     if user_id in user_data_store:
         # Check if user is in add flow (has current_field or current_state in add_states)
         if context.user_data.get('current_field') or current_state in add_states:
-            # User is in add flow, let add_field_input handle it
-            logger.info(f"[FORWARD_GLOBAL] User {user_id} is already in add flow, letting add_field_input handle it")
-            return None
+            # User is in add flow - extract data and go directly to Review
+            logger.info(f"[FORWARD_GLOBAL] User {user_id} is in add flow, extracting data and going to Review")
+            
+            # Check if forward_from is available
+            if update.message.forward_from is None:
+                # Privacy settings - can only extract photo and Facebook link
+                extracted_data = {}
+                if update.message.photo:
+                    largest_photo = update.message.photo[-1]
+                    photo_file_id = largest_photo.file_id
+                    extracted_data['photo_file_id'] = photo_file_id
+                
+                if update.message.caption:
+                    caption = update.message.caption.strip()
+                    is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
+                    if is_valid_fb:
+                        extracted_data['facebook_link'] = fb_normalized
+            else:
+                # Extract full data
+                extracted_data, _ = extract_data_from_forwarded_message(update)
+            
+            # Save extracted data to user_data_store
+            for key, value in extracted_data.items():
+                user_data_store[user_id][key] = value
+            
+            context.user_data['forwarded_extracted_data'] = extracted_data
+            context.user_data['is_forwarded_message'] = True
+            
+            # Go directly to Review
+            context.user_data['current_state'] = ADD_REVIEW
+            context.user_data['current_field'] = 'review'
+            await show_add_review(update, context)
+            return ADD_REVIEW
     
-    # User is not in any active flow - start new add flow from forwarded message
+    # Check if user is in check flow (SMART_CHECK_INPUT state)
+    if current_state == SMART_CHECK_INPUT:
+        # User is in check flow - extract data and check immediately
+        logger.info(f"[FORWARD_GLOBAL] User {user_id} is in check flow, extracting data and checking immediately")
+        
+        # Check if forward_from is available
+        if update.message.forward_from is None:
+            # Privacy settings - cannot extract checkable fields
+            await update.message.reply_text(
+                "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n"
+                "Не удалось извлечь данные для проверки.\n\n"
+                "Попробуйте ввести данные вручную.",
+                reply_markup=get_check_back_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Extract data
+        extracted_data, extracted_info = extract_data_from_forwarded_message(update)
+        
+        # Extract checkable fields only
+        checkable_fields = {}
+        if 'fullname' in extracted_data:
+            checkable_fields['fullname'] = extracted_data['fullname']
+        if 'telegram_name' in extracted_data:
+            checkable_fields['telegram_name'] = extracted_data['telegram_name']
+        if 'telegram_id' in extracted_data:
+            checkable_fields['telegram_id'] = extracted_data['telegram_id']
+        
+        # Save extracted data
+        if user_id not in user_data_store:
+            user_data_store[user_id] = {}
+            user_data_store_access_time[user_id] = time.time()
+        
+        for key, value in extracted_data.items():
+            user_data_store[user_id][key] = value
+        
+        context.user_data['forwarded_extracted_data'] = extracted_data
+        
+        # Check immediately if we have checkable fields
+        if checkable_fields:
+            await check_by_extracted_fields(update, context, checkable_fields)
+        else:
+            await update.message.reply_text(
+                "❌ Не удалось извлечь данные для проверки из пересланного сообщения.\n\n"
+                "Попробуйте ввести данные вручную.",
+                reply_markup=get_check_back_keyboard()
+            )
+        
+        return ConversationHandler.END
+    
+    # User is not in any active flow - extract data and show action choice
     # Check if forward_from is available (privacy settings may hide it)
     if update.message.forward_from is None:
-        # Privacy settings hide the sender info - start normal flow
+        # Privacy settings hide the sender info
         clear_all_conversation_state(context, user_id)
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
-        context.user_data['current_field'] = 'fullname'
-        context.user_data['current_state'] = ADD_FULLNAME
-        context.user_data['add_step'] = 0
+        
+        # Extract data (privacy mode - limited data available)
+        extracted_data = {}
+        extracted_info = []
         
         # Extract photo if available (even if forward_from is None)
-        extracted_info = []
         if update.message.photo:
             # Get largest photo (last in the list)
             largest_photo = update.message.photo[-1]
             photo_file_id = largest_photo.file_id
-            user_data_store[user_id]['photo_file_id'] = photo_file_id
+            extracted_data['photo_file_id'] = photo_file_id
             extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
             logger.info(f"[FORWARD_GLOBAL] Extracted photo_file_id (privacy mode) for user {user_id}: {photo_file_id}")
         
@@ -1149,26 +1316,41 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             caption = update.message.caption.strip()
             is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
             if is_valid_fb:
-                user_data_store[user_id]['facebook_link'] = fb_normalized
+                extracted_data['facebook_link'] = fb_normalized
                 extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
                 logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from caption (privacy mode): {fb_normalized}")
         
-        # Show extracted info if any
-        info_text = ""
-        if extracted_info:
-            info_text = "\n\n✅ Извлечено из сообщения:\n" + "\n".join(extracted_info) + "\n"
+        # Save extracted data
+        for key, value in extracted_data.items():
+            user_data_store[user_id][key] = value
+        context.user_data['forwarded_extracted_data'] = extracted_data
         
-        field_label = get_field_label('fullname')
-        _, _, current_step, total_steps = get_next_add_field('')
-        message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:"
+        # Check if we have any fields for checking (fullname, telegram_name, telegram_id)
+        has_checkable_fields = any(field in extracted_data for field in ['fullname', 'telegram_name', 'telegram_id'])
+        
+        # Build message
+        if extracted_info:
+            info_text = "\n".join(extracted_info)
+            message = f"⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n✅ Извлечено из сообщения:\n\n{info_text}\n\nВыберите действие:"
+        else:
+            message = "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\nНе удалось извлечь данные из пересланного сообщения.\n\nВыберите действие:"
+        
+        # Build keyboard
+        keyboard = []
+        if has_checkable_fields:
+            keyboard.append([
+                InlineKeyboardButton("➕ Добавить", callback_data="forwarded_add"),
+                InlineKeyboardButton("✅ Проверить", callback_data="forwarded_check")
+            ])
+        else:
+            keyboard.append([InlineKeyboardButton("➕ Добавить", callback_data="forwarded_add")])
+        keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
         
         await update.message.reply_text(
-            "⚠️ Данные отправителя недоступны из-за настроек приватности." + info_text + "\n" + message,
-            reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='HTML'
         )
-        # Return None - the next message from user will be handled by ConversationHandler
-        # The state is already set in context.user_data, so ConversationHandler will process it
         return None
     else:
         forward_from = update.message.forward_from
@@ -1181,74 +1363,13 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             )
             return ConversationHandler.END
         
-        # Initialize add flow
+        # Extract data from forward_from and show action choice
         clear_all_conversation_state(context, user_id)
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
-        context.user_data['current_field'] = 'fullname'
-        context.user_data['current_state'] = ADD_FULLNAME
-        context.user_data['add_step'] = 0
         
-        # Extract data from forward_from
-        extracted_data = {}
-        extracted_info = []
-        
-        # Extract telegram_id (required if available)
-        if forward_from.id:
-            telegram_id = normalize_telegram_id(str(forward_from.id))
-            if telegram_id:
-                extracted_data['telegram_id'] = telegram_id
-                extracted_info.append(f"• Telegram ID: {telegram_id}")
-                logger.info(f"[FORWARD_GLOBAL] Extracted telegram_id: {telegram_id}")
-        
-        # Extract telegram_name (if available)
-        if forward_from.username:
-            is_valid, _, normalized = validate_telegram_name(forward_from.username)
-            if is_valid:
-                extracted_data['telegram_name'] = normalized
-                extracted_info.append(f"• Username: @{normalized}")
-                logger.info(f"[FORWARD_GLOBAL] Extracted telegram_name: {normalized}")
-        
-        # Extract fullname (Display Name: first_name + last_name)
-        first_name = forward_from.first_name or ""
-        last_name = forward_from.last_name or ""
-        if first_name or last_name:
-            if last_name:
-                fullname = f"{first_name} {last_name}".strip()
-            else:
-                fullname = first_name
-            normalized_fullname = normalize_text_field(fullname)
-            if normalized_fullname:
-                extracted_data['fullname'] = normalized_fullname
-                extracted_info.append(f"• Имя: {normalized_fullname}")
-                logger.info(f"[FORWARD_GLOBAL] Extracted fullname: {normalized_fullname}")
-        
-        # Parse text message for Facebook link (if available)
-        if update.message.text:
-            text = update.message.text.strip()
-            is_valid_fb, _, fb_normalized = validate_facebook_link(text)
-            if is_valid_fb:
-                extracted_data['facebook_link'] = fb_normalized
-                extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
-                logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from message text: {fb_normalized}")
-        
-        # Parse caption for Facebook link (if available, and text was not processed)
-        if update.message.caption and 'facebook_link' not in extracted_data:
-            caption = update.message.caption.strip()
-            is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
-            if is_valid_fb:
-                extracted_data['facebook_link'] = fb_normalized
-                extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
-                logger.info(f"[FORWARD_GLOBAL] Extracted facebook_link from caption: {fb_normalized}")
-        
-        # Extract photo if available
-        if update.message.photo:
-            # Get largest photo (last in the list)
-            largest_photo = update.message.photo[-1]
-            photo_file_id = largest_photo.file_id
-            extracted_data['photo_file_id'] = photo_file_id
-            extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
-            logger.info(f"[FORWARD_GLOBAL] Extracted photo_file_id for user {user_id}: {photo_file_id}")
+        # Extract data using helper function
+        extracted_data, extracted_info = extract_data_from_forwarded_message(update)
         
         # Save extracted data to user_data_store
         for key, value in extracted_data.items():
@@ -1257,59 +1378,38 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # Update access time
         user_data_store_access_time[user_id] = time.time()
         
+        # Save extracted data in context for callback handlers
+        context.user_data['forwarded_extracted_data'] = extracted_data
+        
         logger.info(f"[FORWARD_GLOBAL] Saved extracted data to user_data_store for user {user_id}: {list(extracted_data.keys())}")
         
-        # Show user what was extracted
+        # Check if we have any fields for checking (fullname, telegram_name, telegram_id)
+        has_checkable_fields = any(field in extracted_data for field in ['fullname', 'telegram_name', 'telegram_id'])
+        
+        # Build message
         if extracted_info:
             info_text = "\n".join(extracted_info)
-            await update.message.reply_text(
-                f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\n"
-                f"Продолжайте заполнение остальных полей."
-            )
+            message = f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\nВыберите действие:"
         else:
-            await update.message.reply_text(
-                "⚠️ Не удалось извлечь данные из пересланного сообщения.\n\n"
-                "Продолжайте заполнение полей вручную."
-            )
+            message = "⚠️ Не удалось извлечь данные из пересланного сообщения.\n\nВыберите действие:"
         
-        # Determine next field to fill - start from beginning and skip all filled fields
-        next_field, next_state, current_step, total_steps = get_next_add_field('')
-        
-        # Skip already filled fields
-        while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
-            logger.info(f"[FORWARD_GLOBAL] Skipping already filled field: {next_field}")
-            next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
-        
-        # Move to next field or review
-        if next_field == 'review':
-            logger.info(f"[FORWARD_GLOBAL] All fields filled, showing review for user {user_id}")
-            await show_add_review(update, context)
-            # Return None to let ConversationHandler handle the state transition
-            return None
+        # Build keyboard
+        keyboard = []
+        if has_checkable_fields:
+            keyboard.append([
+                InlineKeyboardButton("➕ Добавить", callback_data="forwarded_add"),
+                InlineKeyboardButton("✅ Проверить", callback_data="forwarded_check")
+            ])
         else:
-            logger.info(f"[FORWARD_GLOBAL] Starting add flow from field '{next_field}' (step {current_step}/{total_steps}) for user {user_id}")
-            field_label = get_field_label(next_field)
-            is_optional = next_field not in ['fullname']
-            progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
-            
-            if next_field == 'fullname':
-                message = f"{progress_text}📝 Введите {field_label}:"
-            else:
-                requirements = get_field_format_requirements(next_field)
-                message = f"{progress_text}📝 Введите {field_label}:\n\n{requirements}"
-            
-            context.user_data['current_field'] = next_field
-            context.user_data['current_state'] = next_state
-            
-            sent_message = await update.message.reply_text(
-                message,
-                reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
-                parse_mode='HTML'
-            )
-            await save_add_message(update, context, sent_message.message_id)
-            # Return None - the next message from user will be handled by ConversationHandler
-            # The state is already set in context.user_data, so ConversationHandler will process it
-            return None
+            keyboard.append([InlineKeyboardButton("➕ Добавить", callback_data="forwarded_add")])
+        keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='HTML'
+        )
+        return None
 
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular (not forwarded) photo messages - start add lead flow"""
@@ -1349,8 +1449,9 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         return None
     
     # Check if user is already in add flow
+    # If yes, let ConversationHandler handle it (it has photo handler in states)
     if user_id in user_data_store and current_state in add_states:
-        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow, ignoring photo message")
+        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow, letting ConversationHandler handle photo")
         return None
     
     # Extract photo
@@ -2056,6 +2157,44 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                 pass
             # Return None to let ConversationHandler process it
             return None
+        
+        # Special handling for add_skip, add_back, add_cancel - try to activate ConversationHandler
+        if callback_data in ["add_skip", "add_back", "add_cancel"]:
+            logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for add state for user {user_id}")
+            # Check if user has add state initialized
+            current_state = context.user_data.get('current_state')
+            add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+            
+            if current_state in add_states and user_id in user_data_store:
+                logger.info(f"[UNKNOWN_CALLBACK] User {user_id} has add state {current_state}, trying to activate ConversationHandler")
+                # Clear stale ConversationHandler internal keys
+                if context.user_data:
+                    keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
+                    for key in keys_to_remove:
+                        del context.user_data[key]
+                # Answer callback and let ConversationHandler process it
+                try:
+                    await retry_telegram_api(query.answer)
+                except:
+                    pass
+                # Return None to let ConversationHandler process it
+                return None
+            else:
+                # No valid add state - clear and show main menu
+                logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add state for user {user_id}")
+                if user_id:
+                    clear_all_conversation_state(context, user_id)
+                try:
+                    await retry_telegram_api(query.answer, text="⚠️ Сессия истекла. Начните заново.", show_alert=True)
+                    if query.message:
+                        await retry_telegram_api(
+                            query.edit_message_text,
+                            text="⚠️ Сессия истекла.\n\nИспользуйте кнопки меню для навигации.",
+                            reply_markup=get_main_menu_keyboard()
+                        )
+                except:
+                    pass
+                return ConversationHandler.END
         
         # Check if we're in a stale ConversationHandler state
         if context.user_data:
@@ -2876,6 +3015,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
             photo_url = None
+            results = []  # Инициализируем results как пустой список, чтобы избежать ошибки в строке 2881
         
         # Send message with photo if available (only for single result)
         if len(results) == 1 and photo_url:
@@ -3134,6 +3274,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
             photo_url = None
+            results = []  # Инициализируем results как пустой список, чтобы избежать ошибки в строке 3178
         
         # Send message with photo if available (only for single result)
         if len(results) == 1 and photo_url:
@@ -3263,7 +3404,11 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[SMART_CHECK] Detected type: '{field_type}' for value: '{search_value}' (normalized: '{normalized_value}')")
     
     # Route to appropriate search function based on detected type
-    if field_type == 'telegram_id':
+    if field_type == 'facebook_link':
+        # Use existing check_by_field for Facebook link
+        return await check_by_field(update, context, "facebook_link", "Facebook Ссылка", SMART_CHECK_INPUT)
+    
+    elif field_type == 'telegram_id':
         # Use existing check_by_field for Telegram ID
         return await check_by_field(update, context, "telegram_id", "Telegram ID", SMART_CHECK_INPUT)
     
@@ -3556,12 +3701,24 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Determine next field to fill - start from beginning and skip all filled fields
                 # Start from first field and skip all already filled fields
-                next_field, next_state, current_step, total_steps = get_next_add_field('')
+                # Use skip_facebook_link=True for forwarded messages
+                is_forwarded = context.user_data.get('is_forwarded_message', False)
+                next_field, next_state, current_step, total_steps = get_next_add_field('', skip_facebook_link=is_forwarded)
                 
-                # Skip already filled fields (check both key existence and non-empty value)
-                while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
-                    logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
-                    next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+                # Skip already filled fields AND skip facebook_link for forwarded messages
+                while next_field != 'review':
+                    # Always skip facebook_link for forwarded messages
+                    if next_field == 'facebook_link' and is_forwarded:
+                        logger.info(f"[ADD_FIELD] Skipping facebook_link field for forwarded message")
+                        next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=True)
+                        continue
+                    
+                    # Skip if field is already filled
+                    if is_field_filled(user_data_store[user_id], next_field):
+                        logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
+                        next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=is_forwarded)
+                    else:
+                        break
                 
                 # Move to next field or review
                 if next_field == 'review':
@@ -3604,9 +3761,10 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['current_field'] = 'fullname'
                 context.user_data['current_state'] = ADD_FULLNAME
                 context.user_data['add_step'] = 0
+                context.user_data['is_forwarded_message'] = True  # Mark as forwarded message
                 
                 field_label = get_field_label('fullname')
-                _, _, current_step, total_steps = get_next_add_field('')
+                _, _, current_step, total_steps = get_next_add_field('', skip_facebook_link=True)
                 message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:"
                 
                 await update.message.reply_text(
@@ -3633,6 +3791,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.user_data['current_field'] = 'fullname'
                 context.user_data['current_state'] = ADD_FULLNAME
                 context.user_data['add_step'] = 0
+                context.user_data['is_forwarded_message'] = True  # Mark as forwarded message
                 
                 # Extract data from forward_from
                 extracted_data = {}
@@ -3668,7 +3827,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         extracted_info.append(f"• Имя: {normalized_fullname}")
                         logger.info(f"[ADD_FIELD] Extracted fullname: {normalized_fullname}")
                 
-                # Parse text message for Facebook link (if available)
+                # Parse text message for Facebook link (if available) - extract but skip the step
                 if update.message.text:
                     text = update.message.text.strip()
                     is_valid_fb, _, fb_normalized = validate_facebook_link(text)
@@ -3691,12 +3850,24 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 # Determine next field to fill - start from beginning and skip all filled fields
                 # Start from first field and skip all already filled fields
-                next_field, next_state, current_step, total_steps = get_next_add_field('')
+                # Use skip_facebook_link=True for forwarded messages
+                is_forwarded = context.user_data.get('is_forwarded_message', False)
+                next_field, next_state, current_step, total_steps = get_next_add_field('', skip_facebook_link=is_forwarded)
                 
-                # Skip already filled fields (check both key existence and non-empty value)
-                while next_field != 'review' and is_field_filled(user_data_store[user_id], next_field):
-                    logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
-                    next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+                # Skip already filled fields AND skip facebook_link for forwarded messages
+                while next_field != 'review':
+                    # Always skip facebook_link for forwarded messages
+                    if next_field == 'facebook_link' and is_forwarded:
+                        logger.info(f"[ADD_FIELD] Skipping facebook_link field for forwarded message")
+                        next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=True)
+                        continue
+                    
+                    # Skip if field is already filled
+                    if is_field_filled(user_data_store[user_id], next_field):
+                        logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
+                        next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=is_forwarded)
+                    else:
+                        break
                 
                 # Move to next field or review
                 if next_field == 'review':
@@ -3913,23 +4084,39 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"[ADD_FIELD] Saved {field_name} = '{normalized_value}' for user {user_id}")
         logger.info(f"[ADD_FIELD] user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
         
+        # Check if this is a forwarded message
+        is_forwarded = context.user_data.get('is_forwarded_message', False)
+        
         # If Facebook link is valid, automatically skip Telegram fields and go to review
         if field_name == 'facebook_link' and validation_passed:
             logger.info(f"[ADD_FIELD] Facebook link is valid, auto-skipping Telegram fields (telegram_name, telegram_id)")
             # Skip telegram_name and telegram_id, go directly to review
-            next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id')
+            next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id', skip_facebook_link=is_forwarded)
         else:
             # Normal flow - move to next field
-            next_field, next_state, current_step, total_steps = get_next_add_field(field_name)
+            next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
     else:
         logger.warning(f"[ADD_FIELD] Not saving {field_name}: validation_passed={validation_passed}, normalized_value='{normalized_value}'")
+        # Check if this is a forwarded message
+        is_forwarded = context.user_data.get('is_forwarded_message', False)
         # If validation failed, stay on current field
-        next_field, next_state, current_step, total_steps = get_next_add_field(field_name)
+        next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
     
-    # Skip already filled fields (e.g., if they were filled from forwarded message)
-    while next_field != 'review' and is_field_filled(user_data_store.get(user_id, {}), next_field):
-        logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
-        next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+    # Skip already filled fields AND skip facebook_link for forwarded messages
+    is_forwarded = context.user_data.get('is_forwarded_message', False)
+    while next_field != 'review':
+        # Always skip facebook_link for forwarded messages
+        if next_field == 'facebook_link' and is_forwarded:
+            logger.info(f"[ADD_FIELD] Skipping facebook_link field for forwarded message")
+            next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=True)
+            continue
+        
+        # Skip if field is already filled
+        if is_field_filled(user_data_store.get(user_id, {}), next_field):
+            logger.info(f"[ADD_FIELD] Skipping already filled field: {next_field}")
+            next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=is_forwarded)
+        else:
+            break
     
     # Log current state before moving to next field
     if user_id in user_data_store:
@@ -4052,6 +4239,388 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='HTML'
         )
         await save_add_message(update, context, sent_message.message_id)
+
+async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages during add flow - save photo and continue"""
+    if not update.message:
+        return ConversationHandler.END
+    
+    user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state})")
+    
+    # Extract photo
+    largest_photo = update.message.photo[-1]
+    photo_file_id = largest_photo.file_id
+    
+    # Ensure user_data_store exists
+    if user_id not in user_data_store:
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+    
+    # Save photo to user_data_store
+    user_data_store[user_id]['photo_file_id'] = photo_file_id
+    user_data_store_access_time[user_id] = time.time()
+    
+    logger.info(f"[PHOTO_DURING_ADD] Saved photo_file_id={photo_file_id} for user {user_id}")
+    
+    # Notify user that photo was saved
+    await update.message.reply_text(
+        "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
+        "Продолжайте заполнение полей."
+    )
+    
+    # Return current state to continue the flow
+    return current_state
+
+async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Add' button for forwarded message - go directly to Review"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    logger.info(f"[FORWARDED_ADD] User {user_id} chose to add forwarded message")
+    
+    # Get extracted data from context or user_data_store
+    extracted_data = context.user_data.get('forwarded_extracted_data', {})
+    if not extracted_data and user_id in user_data_store:
+        # Fallback: get from user_data_store
+        extracted_data = {k: v for k, v in user_data_store[user_id].items() 
+                         if k in ['fullname', 'telegram_name', 'telegram_id', 'facebook_link', 'photo_file_id']}
+    
+    # Ensure user_data_store has the extracted data
+    if user_id not in user_data_store:
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+    
+    # Save extracted data to user_data_store if not already there
+    for key, value in extracted_data.items():
+        if key not in user_data_store[user_id] or not user_data_store[user_id][key]:
+            user_data_store[user_id][key] = value
+    
+    # Mark as forwarded message
+    context.user_data['is_forwarded_message'] = True
+    
+    # Set state to ADD_REVIEW
+    context.user_data['current_state'] = ADD_REVIEW
+    context.user_data['current_field'] = 'review'
+    
+    # Show review immediately
+    await show_add_review(update, context)
+    
+    return ADD_REVIEW
+
+async def forwarded_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Check' button for forwarded message - check by extracted fields"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    logger.info(f"[FORWARDED_CHECK] User {user_id} chose to check forwarded message")
+    
+    # Get extracted data from context or user_data_store
+    extracted_data = context.user_data.get('forwarded_extracted_data', {})
+    if not extracted_data and user_id in user_data_store:
+        # Fallback: get from user_data_store
+        extracted_data = {k: v for k, v in user_data_store[user_id].items() 
+                         if k in ['fullname', 'telegram_name', 'telegram_id']}
+    
+    # Extract checkable fields
+    checkable_fields = {}
+    if 'fullname' in extracted_data and extracted_data['fullname']:
+        checkable_fields['fullname'] = extracted_data['fullname']
+    if 'telegram_name' in extracted_data and extracted_data['telegram_name']:
+        checkable_fields['telegram_name'] = extracted_data['telegram_name']
+    if 'telegram_id' in extracted_data and extracted_data['telegram_id']:
+        checkable_fields['telegram_id'] = extracted_data['telegram_id']
+    
+    if not checkable_fields:
+        # No fields to check
+        await query.edit_message_text(
+            "❌ Не удалось извлечь данные для проверки из пересланного сообщения.\n\n"
+            "Попробуйте добавить лид вручную.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    # Use check_by_extracted_fields function
+    await check_by_extracted_fields(update, context, checkable_fields)
+    
+    return ConversationHandler.END
+
+async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted_data: dict):
+    """
+    Check leads by extracted fields from forwarded message.
+    Searches in: telegram_user, telegram_id, fullname (based on what's available)
+    """
+    user_id = update.effective_user.id
+    logger.info(f"[EXTRACTED_FIELDS_CHECK] Starting check with extracted data: {list(extracted_data.keys())}")
+    
+    # Get Supabase client
+    client = get_supabase_client()
+    if not client:
+        error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+        elif update.message:
+            await update.message.reply_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+        return
+    
+    try:
+        all_results = []
+        seen_ids = set()
+        
+        # Search in telegram_user (exact match)
+        if 'telegram_name' in extracted_data and extracted_data['telegram_name']:
+            telegram_name = extracted_data['telegram_name']
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("telegram_user", telegram_name).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+            except Exception as e:
+                logger.warning(f"[EXTRACTED_FIELDS_CHECK] Error searching telegram_user: {e}")
+        
+        # Search in telegram_id (exact match)
+        if 'telegram_id' in extracted_data and extracted_data['telegram_id']:
+            telegram_id = extracted_data['telegram_id']
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("telegram_id", telegram_id).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+            except Exception as e:
+                logger.warning(f"[EXTRACTED_FIELDS_CHECK] Error searching telegram_id: {e}")
+        
+        # Search in fullname (contains pattern, case-insensitive)
+        if 'fullname' in extracted_data and extracted_data['fullname']:
+            fullname = extracted_data['fullname']
+            # Escape special characters for ILIKE
+            escaped_fullname = fullname.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+            pattern = f"%{escaped_fullname}%"
+            try:
+                response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+            except Exception as e:
+                logger.warning(f"[EXTRACTED_FIELDS_CHECK] Error searching fullname: {e}")
+        
+        # Limit total results to 50
+        all_results = all_results[:50]
+        
+        # Field labels mapping (Russian)
+        field_labels = {
+            'fullname': 'Клиент',
+            'facebook_link': 'Facebook Ссылка',
+            'telegram_user': 'Имя пользователя Telegram',
+            'telegram_id': 'Telegram ID',
+            'manager_name': 'Добавил',
+            'manager_tag': 'Тег',
+            'photo_url': 'Фото',
+            'created_at': 'Дата'
+        }
+        
+        if all_results:
+            # Show results (same format as check_by_multiple_fields)
+            photo_url = None
+            if len(all_results) > 1:
+                message_parts = [f"✅ <b>Найдено клиентов: {len(all_results)}</b>\n"]
+                
+                for idx, result in enumerate(all_results, 1):
+                    if idx > 1:
+                        message_parts.append("")
+                    message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
+                    for field_name_key, field_label in field_labels.items():
+                        value = result.get(field_name_key)
+                        
+                        if value is None or value == '' or value == 'Не указано':
+                            continue
+                        
+                        # Format date field
+                        if field_name_key == 'created_at':
+                            try:
+                                dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                                value = dt.strftime('%d.%m.%Y %H:%M')
+                            except:
+                                pass
+                        
+                        # Format Facebook link to full URL
+                        if field_name_key == 'facebook_link':
+                            value = format_facebook_link_for_display(value)
+                        
+                        # Format manager_tag as clickable Telegram mention
+                        if field_name_key == 'manager_tag':
+                            tag_value = str(value).strip()
+                            message_parts.append(f"{field_label}: @{tag_value}")
+                        elif field_name_key == 'photo_url':
+                            url = str(value).strip()
+                            if url:
+                                message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
+                        else:
+                            escaped_value = escape_html(str(value))
+                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+            else:
+                # Single result
+                result = all_results[0]
+                message_parts = ["✅ <b>Лид найден</b>", ""]
+                
+                # Check if photo exists
+                photo_url = result.get('photo_url')
+                if photo_url:
+                    photo_url = str(photo_url).strip()
+                
+                for field_name_key, field_label in field_labels.items():
+                    value = result.get(field_name_key)
+                    
+                    if value is None or value == '' or value == 'Не указано':
+                        continue
+                    
+                    # Skip photo_url field - we'll send it as attached image
+                    if field_name_key == 'photo_url':
+                        continue
+                    
+                    # Format date field
+                    if field_name_key == 'created_at':
+                        try:
+                            dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                            value = dt.strftime('%d.%m.%Y %H:%M')
+                        except:
+                            pass
+                    
+                    # Format Facebook link to full URL
+                    if field_name_key == 'facebook_link':
+                        value = format_facebook_link_for_display(value)
+                    
+                    # Format manager_tag as clickable Telegram mention
+                    if field_name_key == 'manager_tag':
+                        tag_value = str(value).strip()
+                        message_parts.append(f"{field_label}: @{tag_value}")
+                    else:
+                        escaped_value = escape_html(str(value))
+                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+            
+            message = "\n".join(message_parts)
+            
+            # Build inline keyboard for editing
+            keyboard = []
+            if len(all_results) == 1:
+                lead_id = all_results[0].get('id')
+                if lead_id is not None:
+                    keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_lead_{lead_id}")])
+            else:
+                for idx, result in enumerate(all_results, 1):
+                    lead_id = result.get('id')
+                    if lead_id is None:
+                        continue
+                    name = result.get('fullname') or "без имени"
+                    label = f"✏️ Клиент {idx} ({name})"
+                    if len(label) > 60:
+                        label = label[:57] + "..."
+                    keyboard.append([InlineKeyboardButton(label, callback_data=f"edit_lead_{lead_id}")])
+            
+            keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+            reply_markup = InlineKeyboardMarkup(keyboard)
+        else:
+            message = "❌ <b>Клиент не найден</b>."
+            reply_markup = get_main_menu_keyboard()
+            photo_url = None
+        
+        # Send message with photo if available (only for single result)
+        if len(all_results) == 1 and photo_url:
+            try:
+                # Try to download and send as file
+                photo_bytes = await download_photo_from_supabase(photo_url)
+                if photo_bytes:
+                    photo_file = io.BytesIO(photo_bytes)
+                    if update.callback_query:
+                        await update.callback_query.message.reply_photo(
+                            photo=photo_file,
+                            caption=message,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                        await update.callback_query.delete_message()
+                    elif update.message:
+                        sent_message = await update.message.reply_photo(
+                            photo=photo_file,
+                            caption=message,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                else:
+                    # If download fails, send text with link
+                    if update.callback_query:
+                        await update.callback_query.edit_message_text(
+                            message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                    elif update.message:
+                        sent_message = await update.message.reply_text(
+                            message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+            except Exception as e:
+                logger.error(f"[EXTRACTED_FIELDS_CHECK] Error sending photo: {e}", exc_info=True)
+                # Fallback: send text with link
+                if update.callback_query:
+                    await update.callback_query.edit_message_text(
+                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                elif update.message:
+                    sent_message = await update.message.reply_text(
+                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+        else:
+            if update.callback_query:
+                await update.callback_query.edit_message_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+            elif update.message:
+                sent_message = await update.message.reply_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+        
+    except Exception as e:
+        logger.error(f"[EXTRACTED_FIELDS_CHECK] ❌ Error in extracted fields check: {e}", exc_info=True)
+        error_msg = get_user_friendly_error(e, "проверке")
+        if update.callback_query:
+            await update.callback_query.edit_message_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+        elif update.message:
+            await update.message.reply_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
 
 # Field labels for uniqueness check messages (Russian)
 UNIQUENESS_FIELD_LABELS = {
@@ -4200,13 +4769,26 @@ async def add_skip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field_name = context.user_data.get('current_field')
     current_state = context.user_data.get('current_state', ADD_FULLNAME)
     
-    # Move to next field
-    next_field, next_state, current_step, total_steps = get_next_add_field(field_name)
+    # Check if this is a forwarded message
+    is_forwarded = context.user_data.get('is_forwarded_message', False)
     
-    # Skip already filled fields (e.g., if they were filled from forwarded message)
-    while next_field != 'review' and is_field_filled(user_data_store.get(user_id, {}), next_field):
-        logger.info(f"[ADD_SKIP] Skipping already filled field: {next_field}")
-        next_field, next_state, current_step, total_steps = get_next_add_field(next_field)
+    # Move to next field
+    next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
+    
+    # Skip already filled fields AND skip facebook_link for forwarded messages
+    while next_field != 'review':
+        # Always skip facebook_link for forwarded messages
+        if next_field == 'facebook_link' and is_forwarded:
+            logger.info(f"[ADD_SKIP] Skipping facebook_link field for forwarded message")
+            next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=True)
+            continue
+        
+        # Skip if field is already filled
+        if is_field_filled(user_data_store.get(user_id, {}), next_field):
+            logger.info(f"[ADD_SKIP] Skipping already filled field: {next_field}")
+            next_field, next_state, current_step, total_steps = get_next_add_field(next_field, skip_facebook_link=is_forwarded)
+        else:
+            break
     
     if next_field == 'review':
         # Show review and save option
@@ -4296,13 +4878,20 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     field_name = context.user_data.get('current_field')
     
-    # Get previous field
+    # Check if this is a forwarded message
+    is_forwarded = context.user_data.get('is_forwarded_message', False)
+    
+    # Get previous field - filter out facebook_link for forwarded messages
     field_sequence = [
         ('fullname', ADD_FULLNAME),
         ('facebook_link', ADD_FB_LINK),
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
     ]
+    
+    # Filter out facebook_link if this is a forwarded message
+    if is_forwarded:
+        field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
     
     prev_field = None
     prev_state = ADD_FULLNAME
@@ -4318,7 +4907,7 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_optional = prev_field not in ['fullname']
         
         # Calculate step number for previous field
-        _, _, current_step, total_steps = get_next_add_field(prev_field)
+        _, _, current_step, total_steps = get_next_add_field(prev_field, skip_facebook_link=is_forwarded)
         progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
         
         # Для обязательных полей (fullname) не показываем требования к формату
@@ -5804,6 +6393,7 @@ def create_telegram_app():
     add_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
+            CallbackQueryHandler(forwarded_add_callback, pattern="^forwarded_add$"),
             # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
             MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
             # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
@@ -5813,6 +6403,7 @@ def create_telegram_app():
         states={
             ADD_FULLNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
@@ -5820,6 +6411,7 @@ def create_telegram_app():
             ],
             ADD_FB_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -5828,6 +6420,7 @@ def create_telegram_app():
             ],
             ADD_TELEGRAM_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -5836,6 +6429,7 @@ def create_telegram_app():
             ],
             ADD_TELEGRAM_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -5845,6 +6439,7 @@ def create_telegram_app():
             ADD_REVIEW: [
                 CallbackQueryHandler(add_save_callback, pattern="^add_save$"),
                 CallbackQueryHandler(edit_fullname_from_review_callback, pattern="^edit_fullname_from_review$"),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
@@ -5960,6 +6555,10 @@ def create_telegram_app():
     # Old check handlers are no longer registered (commented out above)
     # Register AFTER tag_conv so /tag PIN flow has priority over add flow entry points.
     telegram_app.add_handler(add_conv)
+    
+    # Add callback query handler for forwarded message check action (register BEFORE button_callback)
+    # Note: forwarded_add_callback is registered in add_conv entry_points, so no need to register separately
+    telegram_app.add_handler(CallbackQueryHandler(forwarded_check_callback, pattern="^forwarded_check$"))
     
     # Add callback query handler for menu navigation buttons
     # Registered AFTER ConversationHandlers so they have priority
