@@ -1291,6 +1291,8 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
                 "Попробуйте ввести данные вручную.",
                 reply_markup=get_check_back_keyboard()
             )
+            # Clear state if no checkable fields
+            clear_all_conversation_state(context, user_id)
         
         return ConversationHandler.END
     
@@ -3391,6 +3393,15 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"[SMART_CHECK] update.message or update.message.text is None")
         return ConversationHandler.END
     
+    user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    # Check if user is in ADD flow - if yes, don't process as check
+    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if user_id in user_data_store and current_state in add_states:
+        logger.info(f"[SMART_CHECK] User {user_id} is in ADD flow (state={current_state}), not processing as check")
+        return None  # Return None to let ADD flow handler process it
+    
     search_value = update.message.text.strip()
     
     if not search_value:
@@ -4625,6 +4636,10 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
                 reply_markup=get_main_menu_keyboard(),
                 parse_mode='HTML'
             )
+    
+    # Clear conversation state after check is complete (both success and error cases)
+    clear_all_conversation_state(context, user_id)
+    logger.info(f"[EXTRACTED_FIELDS_CHECK] Cleared conversation state for user {user_id}")
 
 # Field labels for uniqueness check messages (Russian)
 UNIQUENESS_FIELD_LABELS = {
