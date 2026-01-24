@@ -1056,7 +1056,14 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
             return result if result is not None else current_state
         elif callback_data == "add_save":
             # Delegate to add_save_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_save callback for user {user_id} in state {current_state}")
             result = await add_save_callback(update, context)
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] add_save_callback returned: {result}")
+            return result if result is not None else ConversationHandler.END
+        elif callback_data == "edit_fullname_from_review":
+            # Delegate to edit_fullname_from_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing edit_fullname_from_review callback for user {user_id} in state {current_state}")
+            result = await edit_fullname_from_review_callback(update, context)
             return result if result is not None else current_state
         
         # If callback doesn't match, just activate ConversationHandler
@@ -1241,6 +1248,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             # Go directly to Review
             context.user_data['current_state'] = ADD_REVIEW
             context.user_data['current_field'] = 'review'
+            logger.info(f"[FORWARD_GLOBAL] Set ADD_REVIEW state for user {user_id}, ConversationHandler should activate via entry points")
             await show_add_review(update, context)
             return ADD_REVIEW
     
@@ -2173,6 +2181,21 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
             
             if current_state in add_states and user_id in user_data_store:
                 logger.info(f"[UNKNOWN_CALLBACK] User {user_id} has add state {current_state}, trying to activate ConversationHandler")
+                # Обработка всех callbacks в состоянии ADD_REVIEW
+                if current_state == ADD_REVIEW and callback_data in ["add_save", "add_back", "add_cancel", "edit_fullname_from_review"]:
+                    logger.info(f"[UNKNOWN_CALLBACK] Explicitly processing {callback_data} for ADD_REVIEW state via check_add_state_entry_callback")
+                    # Answer callback first
+                    try:
+                        await retry_telegram_api(query.answer)
+                    except:
+                        pass
+                    # Process via check_add_state_entry_callback which will delegate to appropriate callback
+                    result = await check_add_state_entry_callback(update, context)
+                    if result is not None:
+                        return result
+                    # If check_add_state_entry_callback returned None, let ConversationHandler try
+                    return None
+                
                 # Clear stale ConversationHandler internal keys
                 if context.user_data:
                     keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
@@ -4323,6 +4346,7 @@ async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_T
     
     # Show review immediately
     await show_add_review(update, context)
+    logger.info(f"[FORWARDED_ADD] Set ADD_REVIEW state for user {user_id}, ConversationHandler should activate via entry points")
     
     return ADD_REVIEW
 
@@ -4423,18 +4447,22 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
         # Search in fullname (contains pattern, case-insensitive)
         if 'fullname' in extracted_data and extracted_data['fullname']:
             fullname = extracted_data['fullname']
-            # Escape special characters for ILIKE
-            escaped_fullname = fullname.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-            pattern = f"%{escaped_fullname}%"
-            try:
-                response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).limit(50).execute()
-                if response.data:
-                    for item in response.data:
-                        if item.get('id') not in seen_ids:
-                            all_results.append(item)
-                            seen_ids.add(item.get('id'))
-            except Exception as e:
-                logger.warning(f"[EXTRACTED_FIELDS_CHECK] Error searching fullname: {e}")
+            # Validate minimum length for fullname search (minimum 3 characters)
+            if len(fullname.strip()) >= 3:
+                # Escape special characters for ILIKE
+                escaped_fullname = fullname.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
+                pattern = f"%{escaped_fullname}%"
+                try:
+                    response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).limit(50).execute()
+                    if response.data:
+                        for item in response.data:
+                            if item.get('id') not in seen_ids:
+                                all_results.append(item)
+                                seen_ids.add(item.get('id'))
+                except Exception as e:
+                    logger.warning(f"[EXTRACTED_FIELDS_CHECK] Error searching fullname: {e}")
+            else:
+                logger.info(f"[EXTRACTED_FIELDS_CHECK] Skipping fullname search - value too short (length: {len(fullname.strip())})")
         
         # Limit total results to 50
         all_results = all_results[:50]
@@ -4899,6 +4927,64 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if this is a forwarded message
     is_forwarded = context.user_data.get('is_forwarded_message', False)
+    
+    # Специальная обработка для состояния ADD_REVIEW
+    if field_name == 'review':
+        # Определить последнее заполненное поле или последнее поле в последовательности
+        field_sequence = [
+            ('fullname', ADD_FULLNAME),
+            ('facebook_link', ADD_FB_LINK),
+            ('telegram_name', ADD_TELEGRAM_NAME),
+            ('telegram_id', ADD_TELEGRAM_ID),
+        ]
+        
+        # Filter out facebook_link if this is a forwarded message
+        if is_forwarded:
+            field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
+        
+        # Найти последнее заполненное поле
+        user_data = user_data_store.get(user_id, {})
+        last_filled_field = None
+        last_filled_state = ADD_FULLNAME
+        
+        # Проверяем поля в обратном порядке
+        for field, state in reversed(field_sequence):
+            if is_field_filled(user_data, field):
+                last_filled_field = field
+                last_filled_state = state
+                break
+        
+        # Если не найдено заполненное поле, используем последнее поле в последовательности
+        if not last_filled_field:
+            last_filled_field, last_filled_state = field_sequence[-1]
+        
+        # Показать форму для последнего поля
+        field_label = get_field_label(last_filled_field)
+        is_optional = last_filled_field not in ['fullname']
+        
+        # Calculate step number for the field
+        _, _, current_step, total_steps = get_next_add_field(last_filled_field, skip_facebook_link=is_forwarded)
+        progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+        
+        # Для обязательных полей (fullname) не показываем требования к формату
+        if last_filled_field == 'fullname':
+            message = f"{progress_text}📝 Введите {field_label}:"
+        else:
+            requirements = get_field_format_requirements(last_filled_field)
+            message = f"{progress_text}📝 Введите {field_label}:\n\n{requirements}"
+        
+        context.user_data['current_field'] = last_filled_field
+        context.user_data['current_state'] = last_filled_state
+        
+        await query.edit_message_text(
+            message,
+            reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=(last_filled_field != 'fullname')),
+            parse_mode='HTML'
+        )
+        # Save message ID for cleanup
+        if query.message:
+            await save_add_message(update, context, query.message.message_id)
+        return last_filled_state
     
     # Get previous field - filter out facebook_link for forwarded messages
     field_sequence = [
@@ -5365,6 +5451,9 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_data_store_access_time:
         del user_data_store_access_time[user_id]
     
+    # Полная очистка состояния, включая внутренние ключи ConversationHandler
+    clear_all_conversation_state(context, user_id)
+    
     return ConversationHandler.END
 
 async def add_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5377,6 +5466,9 @@ async def add_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         del user_data_store[user_id]
     if user_id in user_data_store_access_time:
         del user_data_store_access_time[user_id]
+    
+    # Полная очистка состояния, включая внутренние ключи ConversationHandler
+    clear_all_conversation_state(context, user_id)
     
     await query.edit_message_text(
         "❌ Добавление отменено.",
