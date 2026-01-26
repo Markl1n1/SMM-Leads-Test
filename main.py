@@ -4197,11 +4197,23 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
             logger.info(f"[ADD_FIELD] photo_file_id exists before field save: {user_data_store[user_id]['photo_file_id']}")
         
+        # Protect photo_file_id from being lost if user_data_store is recreated
+        saved_photo_file_id = None
+        if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+            saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+            logger.info(f"[ADD_FIELD] Preserving photo_file_id: {saved_photo_file_id}")
+        
         # Ensure user_data_store entry exists (protection against race conditions)
         if user_id not in user_data_store:
             logger.warning(f"[ADD_FIELD] Created new user_data_store[{user_id}] - this should not happen during add flow if document was saved")
             user_data_store[user_id] = {}
             user_data_store_access_time[user_id] = time.time()
+        
+        # Restore photo_file_id if it was saved
+        if saved_photo_file_id and 'photo_file_id' not in user_data_store[user_id]:
+            user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+            logger.info(f"[ADD_FIELD] Restored photo_file_id: {saved_photo_file_id}")
+        
         user_data_store[user_id][field_name] = normalized_value
         logger.info(f"[ADD_FIELD] Saved {field_name} = '{normalized_value}' for user {user_id}")
         logger.info(f"[ADD_FIELD] user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
@@ -4433,6 +4445,8 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
     user_data_store_access_time[user_id] = time.time()
     
     logger.info(f"[PHOTO_DURING_ADD] Saved photo_file_id={photo_file_id} for user {user_id} in user_data_store")
+    logger.info(f"[PHOTO_DURING_ADD] After saving photo - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
+    logger.info(f"[PHOTO_DURING_ADD] photo_file_id verification: {user_data_store[user_id].get('photo_file_id')}")
     
     # Check if we're on the first step (ADD_FULLNAME) and if there's a caption
     if current_state == ADD_FULLNAME and update.message.caption:
@@ -4441,9 +4455,16 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
         normalized_fullname = normalize_text_field(caption_text)
         
         if normalized_fullname:
+            # Verify photo_file_id is still there before moving to next step
+            if 'photo_file_id' not in user_data_store[user_id]:
+                logger.error(f"[PHOTO_DURING_ADD] CRITICAL: photo_file_id was lost before moving to next step for user {user_id}")
+            else:
+                logger.info(f"[PHOTO_DURING_ADD] photo_file_id confirmed before moving to next step: {user_data_store[user_id]['photo_file_id']}")
+            
             # Save fullname to user_data_store
             user_data_store[user_id]['fullname'] = normalized_fullname
             logger.info(f"[PHOTO_DURING_ADD] Extracted fullname from caption: '{normalized_fullname}' for user {user_id}")
+            logger.info(f"[PHOTO_DURING_ADD] After saving fullname - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}, photo_file_id={user_data_store[user_id].get('photo_file_id')}")
             
             # Move to next step (ADD_FB_LINK)
             context.user_data['current_field'] = 'facebook_link'
