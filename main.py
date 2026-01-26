@@ -802,6 +802,101 @@ async def download_photo_from_supabase(photo_url: str) -> bytes | None:
         logger.error(f"[PHOTO] Error downloading photo from Supabase Storage: {e}", exc_info=True)
         return None
 
+async def send_lead_with_photo(update: Update, result: dict, idx: int, total: int, reply_markup: InlineKeyboardMarkup) -> bool:
+    """
+    Send a single lead with photo as a separate message.
+    Returns True if sent successfully, False otherwise.
+    """
+    # Field labels mapping (Russian)
+    field_labels = {
+        'fullname': 'Клиент',
+        'facebook_link': 'Facebook Ссылка',
+        'telegram_user': 'Тег Telegram',
+        'telegram_id': 'Telegram ID',
+        'manager_name': 'Агент',
+        'manager_tag': 'Тег Агента',
+        'photo_url': 'Фото',
+        'created_at': 'Дата'
+    }
+    
+    # Build message parts
+    message_parts = [f"✅ <b>Клиент {idx}</b>", ""]
+    
+    for field_name_key, field_label in field_labels.items():
+        value = result.get(field_name_key)
+        
+        # Skip if None, empty string, or 'Не указано'
+        if value is None or value == '' or value == 'Не указано':
+            continue
+        
+        # Skip photo_url field - we'll send it as attached image
+        if field_name_key == 'photo_url':
+            continue
+        
+        # Format date field
+        if field_name_key == 'created_at':
+            try:
+                dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                value = dt.strftime('%d.%m.%Y %H:%M')
+            except:
+                pass
+        
+        # Format Facebook link to full URL
+        if field_name_key == 'facebook_link':
+            value = format_facebook_link_for_display(value)
+        
+        # Format manager_tag as clickable Telegram mention
+        if field_name_key == 'manager_tag':
+            tag_value = str(value).strip()
+            message_parts.append(f"{field_label}: @{tag_value}")
+        else:
+            escaped_value = escape_html(str(value))
+            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+    
+    message = "\n".join(message_parts)
+    
+    # Get photo URL
+    photo_url = result.get('photo_url')
+    if not photo_url:
+        logger.warning(f"[SEND_LEAD_PHOTO] No photo_url for lead {result.get('id')}")
+        return False
+    
+    photo_url = str(photo_url).strip()
+    
+    try:
+        # Try to download and send as file
+        photo_bytes = await download_photo_from_supabase(photo_url)
+        if photo_bytes:
+            photo_file = io.BytesIO(photo_bytes)
+            await update.message.reply_photo(
+                photo=photo_file,
+                caption=message,
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+            return True
+        else:
+            # If download fails, send text with link
+            await update.message.reply_text(
+                message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+            return True
+    except Exception as e:
+        logger.error(f"[SEND_LEAD_PHOTO] Error sending photo: {e}", exc_info=True)
+        # Fallback: send text with link
+        try:
+            await update.message.reply_text(
+                message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                reply_markup=reply_markup,
+                parse_mode='HTML'
+            )
+            return True
+        except Exception as e2:
+            logger.error(f"[SEND_LEAD_PHOTO] Error sending fallback message: {e2}", exc_info=True)
+            return False
+
 async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str | None:
     """
     Download photo from Telegram and upload to Supabase Storage.
@@ -1533,11 +1628,21 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     has_caption = bool(update.message.caption and update.message.caption.strip())
     logger.info(f"[PHOTO_MESSAGE] Scenario: {'with text' if (has_text or has_caption) else 'without text'} for user {user_id}")
     
+    # Protect photo_file_id from being lost if user_data_store is recreated
+    saved_photo_file_id = None
+    if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+        saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+        logger.info(f"[PHOTO_MESSAGE] Preserving existing photo_file_id: {saved_photo_file_id}")
+    
     # Initialize add flow
     clear_all_conversation_state(context, user_id)
     user_data_store[user_id] = {}
     user_data_store_access_time[user_id] = time.time()
-    user_data_store[user_id]['photo_file_id'] = photo_file_id
+    user_data_store[user_id]['photo_file_id'] = photo_file_id  # Новое фото
+    
+    # Log if old photo_file_id was replaced
+    if saved_photo_file_id:
+        logger.info(f"[PHOTO_MESSAGE] Old photo_file_id was replaced: {saved_photo_file_id} -> {photo_file_id}")
     
     if has_text or has_caption:
         # Сценарий 2: Фото с текстом - использовать текст как fullname, начать с шага 2
@@ -2211,6 +2316,20 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         callback_data = query.data if query.data else ""
         user_id = query.from_user.id if query.from_user else None
         
+        # Log initial state for diagnostics
+        current_state = context.user_data.get('current_state') if context.user_data else None
+        has_conversation_keys = any(
+            key.startswith('_conversation_') 
+            for key in (context.user_data.keys() if context.user_data else [])
+        )
+        user_data_store_exists = user_id in user_data_store if user_id else False
+        
+        logger.info(
+            f"[UNKNOWN_CALLBACK] Processing unknown callback: '{callback_data}' for user {user_id}, "
+            f"current_state={current_state}, has_conversation_keys={has_conversation_keys}, "
+            f"user_data_store_exists={user_data_store_exists}"
+        )
+        
         # Special handling for check_menu - try to activate ConversationHandler
         if callback_data == "check_menu":
             logger.info(f"[UNKNOWN_CALLBACK] check_menu callback not handled by ConversationHandler, trying to activate for user {user_id}")
@@ -2234,18 +2353,18 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         if callback_data in ["add_skip", "add_back", "add_cancel", "add_save"]:
             logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for add state for user {user_id}")
             # Check if user has add state initialized
-            current_state = context.user_data.get('current_state')
             add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
             
+            logger.info(
+                f"[UNKNOWN_CALLBACK] Checking add state - current_state={current_state}, "
+                f"is_add_state={current_state in add_states if current_state else False}, "
+                f"user_data_store_exists={user_data_store_exists}"
+            )
+            
             if current_state in add_states and user_id in user_data_store:
-                # Add check for internal ConversationHandler keys
-                has_conversation_keys = any(
-                    key.startswith('_conversation_') 
-                    for key in (context.user_data.keys() if context.user_data else [])
-                )
                 logger.info(
                     f"[UNKNOWN_CALLBACK] User {user_id} has add state {current_state}, "
-                    f"has_conversation_keys={has_conversation_keys}, user_data_store_exists={user_id in user_data_store}, "
+                    f"has_conversation_keys={has_conversation_keys}, user_data_store_exists={user_data_store_exists}, "
                     f"trying to activate ConversationHandler for callback: {callback_data}"
                 )
                 # Обработка всех callbacks в состоянии ADD_REVIEW
@@ -2258,14 +2377,17 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                         pass
                     # Process via check_add_state_entry_callback which will delegate to appropriate callback
                     result = await check_add_state_entry_callback(update, context)
+                    logger.info(f"[UNKNOWN_CALLBACK] check_add_state_entry_callback returned: {result}")
                     if result is not None:
                         return result
                     # If check_add_state_entry_callback returned None, let ConversationHandler try
+                    logger.info(f"[UNKNOWN_CALLBACK] check_add_state_entry_callback returned None, letting ConversationHandler process")
                     return None
                 
                 # Clear stale ConversationHandler internal keys
                 if context.user_data:
                     keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
+                    logger.info(f"[UNKNOWN_CALLBACK] Clearing {len(keys_to_remove)} stale ConversationHandler keys")
                     for key in keys_to_remove:
                         del context.user_data[key]
                 # Answer callback and let ConversationHandler process it
@@ -2274,7 +2396,14 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                 except:
                     pass
                 # Return None to let ConversationHandler process it
+                logger.info(f"[UNKNOWN_CALLBACK] Returning None to let ConversationHandler process callback: {callback_data}")
                 return None
+            else:
+                logger.warning(
+                    f"[UNKNOWN_CALLBACK] Cannot activate ConversationHandler for {callback_data} - "
+                    f"current_state={current_state} (not in add_states: {current_state not in add_states if current_state else 'None'}), "
+                    f"user_data_store_exists={user_data_store_exists}"
+                )
             else:
                 # No valid add state - clear and show main menu
                 logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add state for user {user_id}")
@@ -2768,54 +2897,13 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         }
         
         if all_results:
-            # Show results
-            photo_url = None  # Initialize for multiple results case
-            if len(all_results) > 1:
-                message_parts = [f"✅ <b>Найдено клиентов: {len(all_results)}</b>\n"]
-                
-                for idx, result in enumerate(all_results, 1):
-                    if idx > 1:
-                        message_parts.append("")
-                    message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
-                    for field_name_key, field_label in field_labels.items():
-                        value = result.get(field_name_key)
-                        
-                        if value is None or value == '' or value == 'Не указано':
-                            continue
-                        
-                        # Format date field
-                        if field_name_key == 'created_at':
-                            try:
-                                dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-                                value = dt.strftime('%d.%m.%Y %H:%M')
-                            except:
-                                pass
-                        
-                        # Format Facebook link to full URL
-                        if field_name_key == 'facebook_link':
-                            value = format_facebook_link_for_display(value)
-                        
-                        # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
-                        if field_name_key == 'manager_tag':
-                            tag_value = str(value).strip()
-                            message_parts.append(f"{field_label}: @{tag_value}")
-                        elif field_name_key == 'photo_url':
-                            # Format photo_url as clickable link
-                            url = str(value).strip()
-                            if url:
-                                message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
-                        else:
-                            escaped_value = escape_html(str(value))
-                            message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
-            else:
-                # Single result
+            # Handle single result separately
+            if len(all_results) == 1:
                 result = all_results[0]
-                message_parts = ["✅ <b>Лид найден</b>", ""]
-                
-                # Check if photo exists
                 photo_url = result.get('photo_url')
-                if photo_url:
-                    photo_url = str(photo_url).strip()
+                
+                # Build message
+                message_parts = [f"✅ <b>Найдено клиентов: 1</b>", ""]
                 
                 for field_name_key, field_label in field_labels.items():
                     value = result.get(field_name_key)
@@ -2823,7 +2911,7 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     if value is None or value == '' or value == 'Не указано':
                         continue
                     
-                    # Skip photo_url field - we'll send it as attached image
+                    # Skip photo_url field - we'll send it as attached image if available
                     if field_name_key == 'photo_url':
                         continue
                     
@@ -2839,23 +2927,125 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     if field_name_key == 'facebook_link':
                         value = format_facebook_link_for_display(value)
                     
-                    # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
+                    # Format manager_tag as clickable Telegram mention
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
                     else:
                         escaped_value = escape_html(str(value))
                         message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
-            
-            message = "\n".join(message_parts)
-            
-            # Build inline keyboard for editing
-            keyboard = []
-            if len(all_results) == 1:
-                lead_id = all_results[0].get('id')
+                
+                message = "\n".join(message_parts)
+                
+                # Build keyboard
+                keyboard = []
+                lead_id = result.get('id')
                 if lead_id is not None:
                     keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_lead_{lead_id}")])
+                keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send message with photo if available
+                if photo_url and str(photo_url).strip():
+                    try:
+                        photo_bytes = await download_photo_from_supabase(str(photo_url).strip())
+                        if photo_bytes:
+                            photo_file = io.BytesIO(photo_bytes)
+                            sent_message = await update.message.reply_photo(
+                                photo=photo_file,
+                                caption=message,
+                                reply_markup=reply_markup,
+                                parse_mode='HTML'
+                            )
+                        else:
+                            sent_message = await update.message.reply_text(
+                                message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                                reply_markup=reply_markup,
+                                parse_mode='HTML'
+                            )
+                    except Exception as e:
+                        logger.error(f"[MULTIPLE FIELDS SEARCH] Error sending photo: {e}", exc_info=True)
+                        sent_message = await update.message.reply_text(
+                            message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                else:
+                    sent_message = await update.message.reply_text(
+                        message,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                await save_check_message(update, context, sent_message.message_id)
             else:
+                # Multiple results - separate into leads with photos and without photos
+                leads_with_photos = []
+                leads_without_photos = []
+                
+                for result in all_results:
+                    photo_url = result.get('photo_url')
+                    if photo_url and str(photo_url).strip():
+                        leads_with_photos.append(result)
+                    else:
+                        leads_without_photos.append(result)
+                
+                # Send separate messages for leads with photos
+                for idx, result in enumerate(leads_with_photos, 1):
+                    lead_id = result.get('id')
+                    keyboard = []
+                    if lead_id is not None:
+                        keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_lead_{lead_id}")])
+                    keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await send_lead_with_photo(update, result, idx, len(all_results), reply_markup)
+                
+                # Build message for leads without photos
+                if leads_without_photos:
+                    message_parts = [f"✅ <b>Найдено клиентов: {len(all_results)}</b>\n"]
+                    
+                    # Show all leads in the list (for reference)
+                    for idx, result in enumerate(all_results, 1):
+                        if idx > 1:
+                            message_parts.append("")
+                        message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
+                        for field_name_key, field_label in field_labels.items():
+                            value = result.get(field_name_key)
+                            
+                            if value is None or value == '' or value == 'Не указано':
+                                continue
+                            
+                            # Skip photo_url - already sent separately for leads with photos
+                            if field_name_key == 'photo_url':
+                                continue
+                            
+                            # Format date field
+                            if field_name_key == 'created_at':
+                                try:
+                                    dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                                    value = dt.strftime('%d.%m.%Y %H:%M')
+                                except:
+                                    pass
+                            
+                            # Format Facebook link to full URL
+                            if field_name_key == 'facebook_link':
+                                value = format_facebook_link_for_display(value)
+                            
+                            # Format manager_tag as clickable Telegram mention
+                            if field_name_key == 'manager_tag':
+                                tag_value = str(value).strip()
+                                message_parts.append(f"{field_label}: @{tag_value}")
+                            else:
+                                escaped_value = escape_html(str(value))
+                                message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    
+                    message = "\n".join(message_parts)
+                else:
+                    # All leads have photos, send summary message
+                    message = f"✅ <b>Найдено клиентов: {len(all_results)}</b>"
+                
+                # Build inline keyboard for editing
+                keyboard = []
                 for idx, result in enumerate(all_results, 1):
                     lead_id = result.get('id')
                     if lead_id is None:
@@ -2865,49 +3055,26 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     if len(label) > 60:
                         label = label[:57] + "..."
                     keyboard.append([InlineKeyboardButton(label, callback_data=f"edit_lead_{lead_id}")])
-            
-            keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-            reply_markup = InlineKeyboardMarkup(keyboard)
-        else:
-            message = "❌ <b>Клиент не найден</b>."
-            reply_markup = get_main_menu_keyboard()
-            photo_url = None
-        
-        # Send message with photo if available (only for single result)
-        if len(all_results) == 1 and photo_url:
-            try:
-                # Try to download and send as file
-                photo_bytes = await download_photo_from_supabase(photo_url)
-                if photo_bytes:
-                    photo_file = io.BytesIO(photo_bytes)
-                    sent_message = await update.message.reply_photo(
-                        photo=photo_file,
-                        caption=message,
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
-                else:
-                    # If download fails, send text with link
-                    sent_message = await update.message.reply_text(
-                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
-            except Exception as e:
-                logger.error(f"[MULTIPLE FIELDS SEARCH] Error sending photo: {e}", exc_info=True)
-                # Fallback: send text with link
+                
+                keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send summary message
                 sent_message = await update.message.reply_text(
-                    message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                    message,
                     reply_markup=reply_markup,
                     parse_mode='HTML'
                 )
+                await save_check_message(update, context, sent_message.message_id)
         else:
+            message = "❌ <b>Клиент не найден</b>."
+            reply_markup = get_main_menu_keyboard()
             sent_message = await update.message.reply_text(
                 message,
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
-        await save_check_message(update, context, sent_message.message_id)
+            await save_check_message(update, context, sent_message.message_id)
         
     except Exception as e:
         logger.error(f"[MULTI_FIELD_SEARCH] ❌ Error in multi-field search: {e}", exc_info=True)
@@ -3078,7 +3245,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             else:
                 # Single result
                 result = results[0]
-                message_parts = ["✅ <b>Лид найден</b>", ""]  # Empty line after header
+                message_parts = [f"✅ <b>Найдено клиентов: 1</b>", ""]  # Empty line after header
                 
                 # Check if photo exists
                 photo_url = result.get('photo_url')
@@ -3372,7 +3539,6 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if all_results and len(all_results) > 0:
             results = all_results
-            photo_url = None  # Initialize for multiple results case
             
             # Check if more than 10 results
             if len(results) > 10:
@@ -3382,67 +3548,24 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return ConversationHandler.END
             
-            # If multiple results, show all
-            if len(results) > 1:
-                message_parts = [f"✅ <b>Найдено клиентов: {len(results)}</b>\n"]
-                
-                for idx, result in enumerate(results, 1):
-                    if idx > 1:
-                        message_parts.append("")  # Empty line between leads
-                    message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
-                    for field_name_key, field_label in field_labels.items():
-                        value = result.get(field_name_key)
-                        
-                        # Skip if None, empty string, or 'Не указано'
-                        if value is None or value == '' or value == 'Не указано':
-                            continue
-                    
-                    # Format date field
-                    if field_name_key == 'created_at':
-                        try:
-                            dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-                            value = dt.strftime('%d.%m.%Y %H:%M')
-                        except:
-                            pass
-                    
-                    # Format Facebook link to full URL
-                    if field_name_key == 'facebook_link':
-                        value = format_facebook_link_for_display(value)
-                    
-                    # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
-                    if field_name_key == 'manager_tag':
-                        tag_value = str(value).strip()
-                        message_parts.append(f"{field_label}: @{tag_value}")
-                    elif field_name_key == 'photo_url':
-                        # Format photo_url as clickable link
-                        url = str(value).strip()
-                        if url:
-                            message_parts.append(f"{field_label}: <a href=\"{url}\">🔗 Открыть фото</a>")
-                    else:
-                        # Format value in code tags for easy copying
-                        escaped_value = escape_html(str(value))
-                        message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
-            else:
-                # Single result
+            # Handle single result separately
+            if len(results) == 1:
                 result = results[0]
-                message_parts = ["✅ <b>Лид найден</b>", ""]  # Empty line after header
-                
-                # Check if photo exists
                 photo_url = result.get('photo_url')
-                if photo_url:
-                    photo_url = str(photo_url).strip()
+                
+                # Build message
+                message_parts = [f"✅ <b>Найдено клиентов: 1</b>", ""]
                 
                 for field_name_key, field_label in field_labels.items():
                     value = result.get(field_name_key)
                     
-                    # Skip if None, empty string, or 'Не указано'
                     if value is None or value == '' or value == 'Не указано':
                         continue
                     
-                    # Skip photo_url field - we'll send it as attached image
+                    # Skip photo_url field - we'll send it as attached image if available
                     if field_name_key == 'photo_url':
                         continue
-            
+                    
                     # Format date field
                     if field_name_key == 'created_at':
                         try:
@@ -3455,24 +3578,126 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if field_name_key == 'facebook_link':
                         value = format_facebook_link_for_display(value)
                     
-                    # Format manager_tag as clickable Telegram mention (Telegram auto-detects @username)
+                    # Format manager_tag as clickable Telegram mention
                     if field_name_key == 'manager_tag':
                         tag_value = str(value).strip()
                         message_parts.append(f"{field_label}: @{tag_value}")
                     else:
-                        # Format value in code tags for easy copying
                         escaped_value = escape_html(str(value))
                         message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
-            
-            message = "\n".join(message_parts)
-
-            # Build inline keyboard for editing
-            keyboard = []
-            if len(results) == 1:
-                lead_id = results[0].get('id')
+                
+                message = "\n".join(message_parts)
+                
+                # Build keyboard
+                keyboard = []
+                lead_id = result.get('id')
                 if lead_id is not None:
                     keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_lead_{lead_id}")])
+                keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send message with photo if available
+                if photo_url and str(photo_url).strip():
+                    try:
+                        photo_bytes = await download_photo_from_supabase(str(photo_url).strip())
+                        if photo_bytes:
+                            photo_file = io.BytesIO(photo_bytes)
+                            sent_message = await update.message.reply_photo(
+                                photo=photo_file,
+                                caption=message,
+                                reply_markup=reply_markup,
+                                parse_mode='HTML'
+                            )
+                        else:
+                            sent_message = await update.message.reply_text(
+                                message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                                reply_markup=reply_markup,
+                                parse_mode='HTML'
+                            )
+                    except Exception as e:
+                        logger.error(f"[FULLNAME SEARCH] Error sending photo: {e}", exc_info=True)
+                        sent_message = await update.message.reply_text(
+                            message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                    await save_check_message(update, context, sent_message.message_id)
+                else:
+                    sent_message = await update.message.reply_text(
+                        message,
+                        reply_markup=reply_markup,
+                        parse_mode='HTML'
+                    )
+                    await save_check_message(update, context, sent_message.message_id)
             else:
+                # Multiple results - separate into leads with photos and without photos
+                leads_with_photos = []
+                leads_without_photos = []
+                
+                for result in results:
+                    photo_url = result.get('photo_url')
+                    if photo_url and str(photo_url).strip():
+                        leads_with_photos.append(result)
+                    else:
+                        leads_without_photos.append(result)
+                
+                # Send separate messages for leads with photos
+                for idx, result in enumerate(leads_with_photos, 1):
+                    lead_id = result.get('id')
+                    keyboard = []
+                    if lead_id is not None:
+                        keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data=f"edit_lead_{lead_id}")])
+                    keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                    reply_markup = InlineKeyboardMarkup(keyboard)
+                    
+                    await send_lead_with_photo(update, result, idx, len(results), reply_markup)
+                
+                # Build message for leads without photos
+                if leads_without_photos:
+                    message_parts = [f"✅ <b>Найдено клиентов: {len(results)}</b>\n"]
+                    
+                    # Show all leads in the list (for reference)
+                    for idx, result in enumerate(results, 1):
+                        if idx > 1:
+                            message_parts.append("")
+                        message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
+                        for field_name_key, field_label in field_labels.items():
+                            value = result.get(field_name_key)
+                            
+                            if value is None or value == '' or value == 'Не указано':
+                                continue
+                            
+                            # Skip photo_url - already sent separately for leads with photos
+                            if field_name_key == 'photo_url':
+                                continue
+                            
+                            # Format date field
+                            if field_name_key == 'created_at':
+                                try:
+                                    dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                                    value = dt.strftime('%d.%m.%Y %H:%M')
+                                except:
+                                    pass
+                            
+                            # Format Facebook link to full URL
+                            if field_name_key == 'facebook_link':
+                                value = format_facebook_link_for_display(value)
+                            
+                            # Format manager_tag as clickable Telegram mention
+                            if field_name_key == 'manager_tag':
+                                tag_value = str(value).strip()
+                                message_parts.append(f"{field_label}: @{tag_value}")
+                            else:
+                                escaped_value = escape_html(str(value))
+                                message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
+                    
+                    message = "\n".join(message_parts)
+                else:
+                    # All leads have photos, send summary message
+                    message = f"✅ <b>Найдено клиентов: {len(results)}</b>"
+                
+                # Build inline keyboard for editing
+                keyboard = []
                 for idx, result in enumerate(results, 1):
                     lead_id = result.get('id')
                     if lead_id is None:
@@ -3482,51 +3707,27 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if len(label) > 60:
                         label = label[:57] + "..."
                     keyboard.append([InlineKeyboardButton(label, callback_data=f"edit_lead_{lead_id}")])
-            
-            # Add main menu button
-            keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
-            reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                # Send summary message
+                sent_message = await update.message.reply_text(
+                    message,
+                    reply_markup=reply_markup,
+                    parse_mode='HTML'
+                )
+                await save_check_message(update, context, sent_message.message_id)
         else:
             logger.warning(f"[FULLNAME SEARCH] ❌ No results found for pattern '{pattern}' (search_value: '{search_value}', escaped: '{escaped_search_value}')")
             message = "❌ <b>Клиент не найден</b>."
             reply_markup = get_main_menu_keyboard()
-            photo_url = None
-            results = []  # Инициализируем results как пустой список, чтобы избежать ошибки в строке 3178
-        
-        # Send message with photo if available (only for single result)
-        if len(results) == 1 and photo_url:
-            try:
-                # Try to download and send as file
-                photo_bytes = await download_photo_from_supabase(photo_url)
-                if photo_bytes:
-                    photo_file = io.BytesIO(photo_bytes)
-                    await update.message.reply_photo(
-                        photo=photo_file,
-                        caption=message,
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
-                else:
-                    # If download fails, send text with link
-                    await update.message.reply_text(
-                        message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
-                        reply_markup=reply_markup,
-                        parse_mode='HTML'
-                    )
-            except Exception as e:
-                logger.error(f"[FULLNAME SEARCH] Error sending photo: {e}", exc_info=True)
-                # Fallback: send text with link
-                await update.message.reply_text(
-                    message + f"\n\n📷 <a href=\"{photo_url}\">🔗 Открыть фото</a>",
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
-        else:
-            await update.message.reply_text(
+            sent_message = await update.message.reply_text(
                 message,
                 reply_markup=reply_markup,
                 parse_mode='HTML'
             )
+            await save_check_message(update, context, sent_message.message_id)
         
     except Exception as e:
         logger.error(f"[FULLNAME SEARCH] ❌ Error checking by fullname: {e}", exc_info=True)
@@ -4652,11 +4853,22 @@ async def handle_document_during_add(update: Update, context: ContextTypes.DEFAU
         )
         return current_state
     
+    # Protect photo_file_id from being lost if user_data_store is recreated
+    saved_photo_file_id = None
+    if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+        saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+        logger.info(f"[DOCUMENT_DURING_ADD] Preserving existing photo_file_id: {saved_photo_file_id}")
+    
     # Проверить, что user_data_store существует
     if user_id not in user_data_store:
         logger.warning(f"[DOCUMENT_DURING_ADD] user_data_store does not exist for user {user_id}, creating it")
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
+        
+        # Restore photo_file_id if it was saved
+        if saved_photo_file_id:
+            user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+            logger.info(f"[DOCUMENT_DURING_ADD] Restored photo_file_id: {saved_photo_file_id}")
     
     # Log current state of user_data_store before saving
     logger.info(f"[DOCUMENT_DURING_ADD] Before saving - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
@@ -4913,7 +5125,7 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
             else:
                 # Single result
                 result = all_results[0]
-                message_parts = ["✅ <b>Лид найден</b>", ""]
+                message_parts = [f"✅ <b>Найдено клиентов: 1</b>", ""]
                 
                 # Check if photo exists
                 photo_url = result.get('photo_url')
@@ -5685,1502 +5897,3 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[NEW_LEAD_SAVED] Lead ID: {lead_id}")
             
             # Try to upload photo if we extracted it earlier
-            logger.info(f"[ADD_SAVE] Before photo check - user_data_store[{user_id}] keys: {list(user_data_store.get(user_id, {}).keys())}")
-            logger.info(f"[ADD_SAVE] Before photo check - user_data keys: {list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
-            logger.info(f"[ADD_SAVE] Checking for photo in user_data: keys={list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
-            # Log ConversationHandler state for diagnostics
-            has_conversation_keys = any(
-                key.startswith('_conversation_') 
-                for key in (context.user_data.keys() if context.user_data else [])
-            )
-            logger.info(f"[ADD_SAVE] ConversationHandler state - has_conversation_keys={has_conversation_keys}, current_state={context.user_data.get('current_state')}")
-            
-            # Get photo_file_id from user_data, but also check user_data_store directly as fallback
-            # This ensures we don't lose photo_file_id if it was saved but not in user_data
-            user_photo_file_id = user_data.get('photo_file_id')
-            if not user_photo_file_id and user_id in user_data_store:
-                # Fallback: check user_data_store directly
-                user_photo_file_id = user_data_store[user_id].get('photo_file_id')
-                if user_photo_file_id:
-                    logger.info(f"[ADD_SAVE] Found photo_file_id in user_data_store (was missing in user_data): {user_photo_file_id}")
-                    # Update user_data for consistency
-                    user_data['photo_file_id'] = user_photo_file_id
-            if lead_id:
-                if user_photo_file_id:
-                    logger.info(f"[PHOTO] Starting photo upload for lead {lead_id} from file_id={user_photo_file_id}")
-                    photo_url = await upload_lead_photo_to_supabase(context.bot, user_photo_file_id, lead_id)
-                    if photo_url:
-                        try:
-                            # Update the lead with photo_url
-                            client.table(TABLE_NAME).update({"photo_url": photo_url}).eq("id", lead_id).execute()
-                            logger.info(f"[PHOTO] Successfully saved photo_url for lead {lead_id}: {photo_url}")
-                        except Exception as e:
-                            logger.error(f"[PHOTO] Failed to save photo_url to database for lead {lead_id}: {e}", exc_info=True)
-                    else:
-                        logger.warning(f"[PHOTO] Photo upload failed (returned None) for lead {lead_id}, file_id={user_photo_file_id}")
-                else:
-                    logger.warning(f"[PHOTO] No photo_file_id in user_data for lead {lead_id}, user_data keys: {list(user_data.keys())}")
-            
-            # Log all fields with their values
-            field_labels = {
-                'fullname': 'Клиент (fullname)',
-                'manager_name': 'Стейдж менеджера (manager_name)',
-                'manager_tag': 'Тег менеджера (manager_tag)',
-                'facebook_link': 'Facebook Ссылка (facebook_link)',
-                'telegram_user': 'Тег Telegram (telegram_user)',
-                'telegram_id': 'Telegram ID (telegram_id)',
-                'photo_url': 'Фото (photo_url)',
-                'created_at': 'Дата создания (created_at)'
-            }
-            
-            logged_fields = []
-            for field_name, field_label in field_labels.items():
-                value = saved_lead.get(field_name)
-                if value is not None and value != '':
-                    logged_fields.append(f"  {field_label}: '{value}'")
-                else:
-                    logged_fields.append(f"  {field_label}: (не указано)")
-            
-            logger.info(f"[NEW_LEAD_SAVED] Fields:\n" + "\n".join(logged_fields))
-        
-        if response.data:
-            # Show success message with entered data
-            message_parts = ["✅ <b>Клиент успешно добавлен!</b>\n"]
-            field_labels = {
-                'fullname': 'Имя Фамилия',
-                'facebook_link': 'Facebook Ссылка',
-                'telegram_name': 'Тег Telegram',
-                'telegram_id': 'Telegram ID'
-            }
-            
-            for field_name, field_label in field_labels.items():
-                # Check telegram_user for display (it was mapped from telegram_name)
-                display_field = 'telegram_user' if field_name == 'telegram_name' else field_name
-                value = save_data.get(display_field) or user_data.get(field_name)
-                if value:
-                    # Format Facebook link to full URL for display
-                    if field_name == 'facebook_link':
-                        formatted_value = format_facebook_link_for_display(str(value))
-                        escaped_value = escape_html(formatted_value)
-                    else:
-                        escaped_value = escape_html(str(value))
-                    message_parts.append(f"{field_label}: <code>{escaped_value}</code>")
-            
-            # Add date
-            from datetime import datetime
-            message_parts.append(f"Дата добавления: {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-            
-            message = "\n".join(message_parts)
-            
-            # Get review screen message ID to exclude from cleanup
-            review_message_id = None
-            if query.message:
-                review_message_id = query.message.message_id
-            
-            # Clean up all add flow messages BEFORE showing final success message
-            # Exclude review screen message so we can edit it
-            await cleanup_add_messages(update, context, exclude_message_id=review_message_id)
-            
-            try:
-                await query.edit_message_text(
-                    message,
-                    reply_markup=get_main_menu_keyboard(),
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                # If edit fails (message was deleted), send new message
-                if "not found" in str(e) or "BadRequest" in str(type(e).__name__):
-                    await query.message.reply_text(
-                        message,
-                        reply_markup=get_main_menu_keyboard(),
-                        parse_mode='HTML'
-                    )
-                else:
-                    raise
-        else:
-            # Get review screen message ID to exclude from cleanup
-            review_message_id = None
-            if query.message:
-                review_message_id = query.message.message_id
-            
-            # Clean up all add flow messages BEFORE showing error message
-            # Exclude review screen message so we can edit it
-            await cleanup_add_messages(update, context, exclude_message_id=review_message_id)
-            
-            try:
-                await query.edit_message_text(
-                    "❌ <b>Ошибка:</b> Данные не были сохранены.\n\n"
-                    "ℹ️ Попробуйте снова или обратитесь к администратору.",
-                    reply_markup=get_main_menu_keyboard(),
-                    parse_mode='HTML'
-                )
-            except Exception as e:
-                # If edit fails (message was deleted), send new message
-                if "not found" in str(e) or "BadRequest" in str(type(e).__name__):
-                    await query.message.reply_text(
-                        "❌ <b>Ошибка:</b> Данные не были сохранены.\n\n"
-                        "ℹ️ Попробуйте снова или обратитесь к администратору.",
-                        reply_markup=get_main_menu_keyboard(),
-                        parse_mode='HTML'
-                    )
-                else:
-                    raise
-    
-    except Exception as e:
-        logger.error(f"Error adding client: {e}", exc_info=True)
-        error_msg = get_user_friendly_error(e, "сохранении данных")
-        
-        # Get review screen message ID to exclude from cleanup
-        review_message_id = None
-        if query.message:
-            review_message_id = query.message.message_id
-        
-        # Clean up all add flow messages BEFORE showing error message
-        # Exclude review screen message so we can edit it
-        await cleanup_add_messages(update, context, exclude_message_id=review_message_id)
-        
-        try:
-            await query.edit_message_text(
-                error_msg,
-                reply_markup=get_main_menu_keyboard(),
-                parse_mode='HTML'
-            )
-        except Exception as edit_error:
-            # If edit fails (message was deleted), send new message
-            if "not found" in str(edit_error) or "BadRequest" in str(type(edit_error).__name__):
-                await query.message.reply_text(
-                    error_msg,
-                    reply_markup=get_main_menu_keyboard(),
-                    parse_mode='HTML'
-                )
-            else:
-                raise
-    
-    # Clean up
-    if user_id in user_data_store:
-        del user_data_store[user_id]
-    if user_id in user_data_store_access_time:
-        del user_data_store_access_time[user_id]
-    
-    # Полная очистка состояния, включая внутренние ключи ConversationHandler
-    clear_all_conversation_state(context, user_id)
-    
-    return ConversationHandler.END
-
-async def add_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel adding new lead"""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    
-    if user_id in user_data_store:
-        del user_data_store[user_id]
-    if user_id in user_data_store_access_time:
-        del user_data_store_access_time[user_id]
-    
-    # Полная очистка состояния, включая внутренние ключи ConversationHandler
-    clear_all_conversation_state(context, user_id)
-    
-    await query.edit_message_text(
-        "❌ Добавление отменено.",
-        reply_markup=get_main_menu_keyboard()
-    )
-    return ConversationHandler.END
-
-# Edit lead functionality
-async def edit_lead_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, lead_id: int):
-    """Start editing a lead"""
-    query = update.callback_query
-    await query.answer()
-    
-    # Get lead from database
-    client = get_supabase_client()
-    if not client:
-        await query.edit_message_text(
-            "❌ Ошибка: Не удалось подключиться к базе данных.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    try:
-        response = client.table(TABLE_NAME).select("*").eq("id", lead_id).execute()
-        if not response.data or len(response.data) == 0:
-            await query.edit_message_text(
-                "❌ Ошибка: Лид не найден.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return ConversationHandler.END
-        
-        lead = response.data[0]
-        user_id = query.from_user.id
-        
-        # Store lead data for editing
-        # Map telegram_user to telegram_name for consistency
-        lead_data = lead.copy()
-        if 'telegram_user' in lead_data and lead_data.get('telegram_user'):
-            # Map telegram_user to telegram_name for consistency in UI
-            if 'telegram_name' not in lead_data or not lead_data.get('telegram_name'):
-                lead_data['telegram_name'] = lead_data.get('telegram_user')
-        
-        # Ensure all fields are present (even if None/empty) for proper display
-        # This ensures indicators work correctly
-        for field in ['fullname', 'manager_name', 'facebook_link', 'telegram_name', 'telegram_id']:
-            if field not in lead_data:
-                lead_data[field] = None
-        
-        user_data_store[user_id] = lead_data
-        user_data_store_access_time[user_id] = time.time()
-        context.user_data['editing_lead_id'] = lead_id
-        
-        # Reset PIN attempt counter when starting new edit
-        context.user_data['pin_attempts'] = 0
-        
-        # Request PIN code before allowing editing
-        message = f"🔒 Для редактирования лида (ID: {lead_id}) требуется PIN-код.\n\nВведите PIN-код:"
-        # Use reply_text instead of edit_message_text to ensure ConversationHandler works correctly
-        await query.message.reply_text(message)
-        return EDIT_PIN
-        
-    except Exception as e:
-        logger.error(f"Error loading lead for editing: {e}", exc_info=True)
-        await query.edit_message_text(
-            "❌ Произошла ошибка при загрузке лида. Попробуйте позже.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-
-async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle PIN code input for editing"""
-    user_id = update.effective_user.id
-    
-    # Check if message exists and has text
-    if not update.message or not update.message.text:
-        if update.message:
-            await update.message.reply_text(
-                "❌ Ошибка: Неверный формат сообщения. Пожалуйста, введите PIN-код текстом."
-            )
-        else:
-            logger.error("edit_pin_input: update.message is None")
-        return EDIT_PIN
-    
-    text = update.message.text.strip()
-    lead_id = context.user_data.get('editing_lead_id')
-    
-    if not lead_id:
-        await update.message.reply_text(
-            "❌ Ошибка: ID лида не найден. Пожалуйста, начните редактирование заново.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    # PIN code is "2025"
-    PIN_CODE = "2025"
-    
-    if text == PIN_CODE:
-        # PIN is correct, reset attempt counter
-        if 'pin_attempts' in context.user_data:
-            del context.user_data['pin_attempts']
-        
-        # PIN is correct, show edit menu
-        # Clear any old field editing state to prevent automatic transitions
-        if 'current_field' in context.user_data:
-            del context.user_data['current_field']
-        if 'current_state' in context.user_data:
-            del context.user_data['current_state']
-        
-        # Always reload lead data to ensure we have the latest from DB
-        client = get_supabase_client()
-        if client:
-            try:
-                response = client.table(TABLE_NAME).select("*").eq("id", lead_id).execute()
-                if response.data and len(response.data) > 0:
-                    lead = response.data[0]
-                    lead_data = lead.copy()
-                    if 'telegram_user' in lead_data and lead_data.get('telegram_user'):
-                        if 'telegram_name' not in lead_data or not lead_data.get('telegram_name'):
-                            lead_data['telegram_name'] = lead_data.get('telegram_user')
-                    # Ensure all fields are present (even if None)
-                    for field in ['fullname', 'manager_name', 'facebook_link', 'telegram_name', 'telegram_id']:
-                        if field not in lead_data:
-                            lead_data[field] = None
-                    
-                    # Save original data for comparison (deep copy)
-                    context.user_data['original_lead_data'] = lead_data.copy()
-                    
-                    # Initialize user_data_store with current data
-                    user_data_store[user_id] = lead_data.copy()
-                    user_data_store_access_time[user_id] = time.time()
-                else:
-                    await update.message.reply_text(
-                        "❌ Ошибка: Лид не найден в базе данных.",
-                        reply_markup=get_main_menu_keyboard()
-                    )
-                    return ConversationHandler.END
-            except Exception as e:
-                logger.error(f"Error reloading lead data in PIN handler: {e}", exc_info=True)
-                await update.message.reply_text(
-                    "❌ Ошибка: Не удалось загрузить данные лида.",
-                    reply_markup=get_main_menu_keyboard()
-                )
-                return ConversationHandler.END
-        else:
-            await update.message.reply_text(
-                "❌ Ошибка: Не удалось подключиться к базе данных.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return ConversationHandler.END
-        
-        message = f"✏️ Редактирование лида (ID: {lead_id})\n\nВыберите поле для редактирования:"
-        await update.message.reply_text(
-            message,
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-        return EDIT_MENU
-    else:
-        # PIN is incorrect, increment attempt counter
-        pin_attempts = context.user_data.get('pin_attempts', 0) + 1
-        context.user_data['pin_attempts'] = pin_attempts
-        
-        if pin_attempts >= 3:
-            # Too many failed attempts, return to main menu
-            await update.message.reply_text(
-                "❌ Превышено количество попыток ввода PIN-кода (3). Доступ к редактированию заблокирован.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            # Clear editing state
-            if 'editing_lead_id' in context.user_data:
-                del context.user_data['editing_lead_id']
-            if 'pin_attempts' in context.user_data:
-                del context.user_data['pin_attempts']
-            return ConversationHandler.END
-        else:
-            # PIN is incorrect, ask again
-            remaining_attempts = 3 - pin_attempts
-            await update.message.reply_text(
-                f"❌ Неверный PIN-код. Осталось попыток: {remaining_attempts}\n\nВведите PIN-код:"
-            )
-            return EDIT_PIN
-
-def get_edit_field_keyboard(user_id: int, original_data: dict = None):
-    """Create keyboard for editing lead fields with change indicators"""
-    user_data = user_data_store.get(user_id, {})
-    keyboard = []
-    
-    # Helper function to check if field has a value
-    def has_value(field_name):
-        value = user_data.get(field_name)
-        return value is not None and value != '' and (not isinstance(value, str) or value.strip() != '')
-    
-    # Helper function to check if field was changed
-    def is_changed(field_name):
-        if not original_data:
-            return False
-        current_value = user_data.get(field_name)
-        original_value = original_data.get(field_name)
-        # Handle telegram_user/telegram_name mapping
-        if field_name == 'telegram_name':
-            original_value = original_data.get('telegram_name') or original_data.get('telegram_user')
-        # Compare values (handle None and empty strings)
-        if current_value is None and (original_value is None or original_value == ''):
-            return False
-        if current_value == '' and (original_value is None or original_value == ''):
-            return False
-        return str(current_value).strip() != str(original_value).strip() if original_value else current_value is not None
-    
-    # Helper function to get status indicator
-    def get_status(field_name):
-        if is_changed(field_name):
-            return "🟡"  # Changed
-        elif has_value(field_name):
-            return "🟢"  # Filled, not changed
-        else:
-            return "⚪"  # Empty
-    
-    # Mandatory fields
-    fullname_status = get_status('fullname')
-    manager_status = get_status('manager_name')
-    
-    keyboard.append([InlineKeyboardButton(f"{fullname_status} Имя Фамилия *", callback_data="edit_field_fullname")])
-    keyboard.append([InlineKeyboardButton(f"{manager_status} Агент *", callback_data="edit_field_manager")])
-    
-    # Identifier fields
-    fb_link_status = get_status('facebook_link')
-    telegram_name_status = get_status('telegram_name')
-    telegram_id_status = get_status('telegram_id')
-    
-    keyboard.append([InlineKeyboardButton(f"{fb_link_status} Facebook Ссылка", callback_data="edit_field_fb_link")])
-    keyboard.append([InlineKeyboardButton(f"{telegram_name_status} Тег Telegram", callback_data="edit_field_telegram_name")])
-    keyboard.append([InlineKeyboardButton(f"{telegram_id_status} Telegram ID", callback_data="edit_field_telegram_id")])
-    
-    # Action buttons
-    keyboard.append([InlineKeyboardButton("💾 Сохранить изменения", callback_data="edit_save")])
-    keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="edit_cancel")])
-    
-    return InlineKeyboardMarkup(keyboard)
-
-# Edit field callbacks (must be defined before create_telegram_app)
-async def edit_field_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str, field_label: str, next_state: int):
-    """Universal callback for editing field selection"""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    
-    # If field is already filled, ask if user wants to change it
-    if user_data_store.get(user_id, {}).get(field_name):
-        await query.edit_message_text(
-            f"📝 {field_label} текущее значение: {user_data_store[user_id][field_name]}\n"
-            f"Введите новое значение или отправьте /skip чтобы оставить текущее:"
-        )
-    else:
-        await query.edit_message_text(f"📝 Введите {field_label}:")
-    
-    context.user_data['current_field'] = field_name
-    context.user_data['current_state'] = next_state
-    return next_state
-
-async def edit_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Universal handler for edit field input"""
-    if not update.message or not update.message.text:
-        logger.error("edit_field_input: update.message or update.message.text is None")
-        return ConversationHandler.END
-    
-    user_id = update.effective_user.id
-    
-    # Check for /skip command first
-    if update.message.text.strip() == "/skip":
-        # User wants to skip changing this field, return to edit menu
-        await update.message.reply_text(
-            "✏️ Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-        # Clear current_field to prevent issues
-        if 'current_field' in context.user_data:
-            del context.user_data['current_field']
-        if 'current_state' in context.user_data:
-            del context.user_data['current_state']
-        return EDIT_MENU
-    
-    text = update.message.text.strip()
-    
-    # Check length for text fields (fullname, manager_name)
-    field_name = context.user_data.get('current_field')
-    if field_name in ['fullname', 'manager_name'] and len(text) > 500:
-        field_label = get_field_label(field_name)
-        await update.message.reply_text(
-            f"❌ {field_label} слишком длинное (максимум 500 символов).\n\n"
-            f"Попробуйте снова:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-        return context.user_data.get('current_state', EDIT_MENU)
-    
-    # Update access time BEFORE cleanup to prevent deletion
-    # Update access time BEFORE cleanup to protect from race conditions
-    user_data_store_access_time[user_id] = time.time()
-    
-    # Ensure user_data_store entry exists before cleanup
-    if user_id not in user_data_store:
-        # Re-initialize from database if missing
-        lead_id = context.user_data.get('editing_lead_id')
-        if lead_id:
-            client = get_supabase_client()
-            if client:
-                try:
-                    response = client.table(TABLE_NAME).select("*").eq("id", lead_id).execute()
-                    if response.data and len(response.data) > 0:
-                        lead = response.data[0]
-                        lead_data = lead.copy()
-                        if 'telegram_user' in lead_data and lead_data.get('telegram_user'):
-                            if 'telegram_name' not in lead_data or not lead_data.get('telegram_name'):
-                                lead_data['telegram_name'] = lead_data.get('telegram_user')
-                        for field in ['fullname', 'manager_name', 'facebook_link', 'telegram_name', 'telegram_id']:
-                            if field not in lead_data:
-                                lead_data[field] = None
-                        # Save original data if not already saved
-                        if 'original_lead_data' not in context.user_data:
-                            context.user_data['original_lead_data'] = lead_data.copy()
-                        user_data_store[user_id] = lead_data
-                        user_data_store_access_time[user_id] = time.time()
-                except Exception as e:
-                    logger.error(f"Error reloading lead data: {e}", exc_info=True)
-        else:
-            # If no lead_id, create empty entry
-            user_data_store[user_id] = {}
-    
-    # Cleanup with exclusion of current user to prevent race conditions
-    cleanup_user_data_store(exclude_user_id=user_id)
-    
-    if not field_name:
-        await update.message.reply_text(
-            "❌ Ошибка: поле не определено.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    # Ensure user_data_store[user_id] exists
-    if user_id not in user_data_store:
-        user_data_store[user_id] = {}
-    
-    # Validate and normalize based on field type (same logic as add_field_input)
-    validation_passed = False
-    normalized_value = text
-    
-    if field_name == 'facebook_link':
-        is_valid, error_msg, extracted = validate_facebook_link(text)
-        if is_valid:
-            validation_passed = True
-            normalized_value = extracted
-        else:
-            await update.message.reply_text(f"❌ {error_msg}\n\nПопробуйте снова:")
-            return context.user_data.get('current_state', EDIT_MENU)
-    
-    elif field_name == 'telegram_name':
-        is_valid, error_msg, normalized = validate_telegram_name(text)
-        if is_valid:
-            validation_passed = True
-            normalized_value = normalized
-        else:
-            await update.message.reply_text(f"❌ {error_msg}\n\nПопробуйте снова:")
-            return context.user_data.get('current_state', EDIT_MENU)
-    
-    elif field_name == 'telegram_id':
-        is_valid, error_msg, normalized = validate_telegram_id(text)
-        if is_valid:
-            validation_passed = True
-            normalized_value = normalized
-        else:
-            await update.message.reply_text(f"❌ {error_msg}\n\nПопробуйте снова:")
-            return context.user_data.get('current_state', EDIT_MENU)
-    
-    else:
-        # For other fields (fullname, manager_name), normalize text and check not empty
-        if text:
-            # Normalize text fields (fullname, manager_name)
-            normalized_value = normalize_text_field(text)
-            if normalized_value:
-                validation_passed = True
-            else:
-                # Text was only whitespace
-                validation_passed = False
-        else:
-            await update.message.reply_text(f"❌ Поле не может быть пустым.\n\nПопробуйте снова:")
-            return context.user_data.get('current_state', EDIT_MENU)
-    
-    # Save value only if validation passed
-    if validation_passed and normalized_value:
-        # Ensure user_data_store[user_id] exists before assignment (protection against race conditions)
-        if user_id not in user_data_store:
-            user_data_store[user_id] = {}
-        user_data_store[user_id][field_name] = normalized_value
-        # Update access time after saving to protect from cleanup
-        user_data_store_access_time[user_id] = time.time()
-        
-        # Show confirmation message
-        field_label = get_field_label(field_name)
-        await update.message.reply_text(
-            f"✅ <b>{field_label}</b> успешно изменено!\n\n"
-            f"Новое значение: <code>{normalized_value}</code>\n\n"
-            f"Выберите следующее поле для редактирования:",
-            parse_mode='HTML',
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-    else:
-        # Show edit menu again (validation failed or value is empty)
-        await update.message.reply_text(
-            "✏️ Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-    return EDIT_MENU
-
-async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Save edited lead"""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    lead_id = context.user_data.get('editing_lead_id')
-    
-    if not lead_id:
-        await query.edit_message_text(
-            "❌ Ошибка: ID лида не найден.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    # Get Supabase client first
-    client = get_supabase_client()
-    if not client:
-        await query.edit_message_text(
-            "❌ Ошибка: Не удалось подключиться к базе данных.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    # Load current data from database for merge logic
-    try:
-        response = client.table(TABLE_NAME).select("*").eq("id", lead_id).execute()
-        if not response.data or len(response.data) == 0:
-            await query.edit_message_text(
-                "❌ Ошибка: Лид не найден в базе данных.",
-                reply_markup=get_main_menu_keyboard()
-            )
-            return ConversationHandler.END
-        
-        current_db_data = response.data[0].copy()
-        # Map telegram_user to telegram_name for comparison
-        if 'telegram_user' in current_db_data and current_db_data.get('telegram_user'):
-            if 'telegram_name' not in current_db_data or not current_db_data.get('telegram_name'):
-                current_db_data['telegram_name'] = current_db_data.get('telegram_user')
-    except Exception as e:
-        logger.error(f"Error loading current lead data in save: {e}", exc_info=True)
-        await query.edit_message_text(
-            "❌ Ошибка: Не удалось загрузить данные лида из базы.",
-            reply_markup=get_main_menu_keyboard()
-        )
-        return ConversationHandler.END
-    
-    # Get user_data (changes made by user)
-    user_data = user_data_store.get(user_id, {})
-    
-    # Validation (same as add_save_callback)
-    # Check if fullname is empty or None
-    fullname_value = user_data.get('fullname')
-    if not fullname_value or (isinstance(fullname_value, str) and not fullname_value.strip()):
-        await query.edit_message_text(
-            "❌ <b>Ошибка:</b> Имя Фамилия обязателен для заполнения!\n\n"
-            "⚠️ Пожалуйста, заполните это поле перед сохранением.\n\n"
-            "Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {})),
-            parse_mode='HTML'
-        )
-        return EDIT_MENU
-    
-    # Check if manager_name is empty or None
-    manager_value = user_data.get('manager_name')
-    if not manager_value or (isinstance(manager_value, str) and not manager_value.strip()):
-        await query.edit_message_text(
-            "❌ <b>Ошибка:</b> Агент обязателен для заполнения!\n\n"
-            "⚠️ Пожалуйста, заполните это поле перед сохранением.\n\n"
-            "Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {})),
-            parse_mode='HTML'
-        )
-        return EDIT_MENU
-    
-    # Check if at least one identifier is present
-    required_fields = ['facebook_link', 'telegram_name', 'telegram_id']
-    # Also check telegram_user for backward compatibility
-    has_identifier = any(user_data.get(field) for field in required_fields) or user_data.get('telegram_user')
-    
-    if not has_identifier:
-        await query.edit_message_text(
-            "❌ Ошибка: Необходимо указать минимум одно из полей:\n"
-            "Facebook Ссылка, Тег Telegram или Telegram ID!\n\n"
-            "Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
-        )
-        return EDIT_MENU
-    
-    # Merge logic: Start with current DB data, apply only changes from user_data_store
-    # This ensures unchanged fields are not lost
-    update_data = current_db_data.copy()
-    
-    # Remove fields that shouldn't be updated
-    for field in ['id', 'created_at']:
-        update_data.pop(field, None)
-    
-    # Apply only fields that were changed by the user
-    # Compare with original data to determine what was actually changed
-    original_data = context.user_data.get('original_lead_data', {})
-    
-    # Fields that can be edited
-    editable_fields = ['fullname', 'manager_name', 'facebook_link', 'telegram_name', 'telegram_id']
-    
-    for field in editable_fields:
-        if field in user_data:
-            # Get current value from user_data (what user entered/changed)
-            current_value = user_data.get(field)
-            # Get original value (when editing started)
-            original_value = original_data.get(field)
-            # Handle telegram_user/telegram_name mapping for original
-            if field == 'telegram_name':
-                original_value = original_data.get('telegram_name') or original_data.get('telegram_user')
-            
-            # Normalize values for comparison (handle None, empty strings, whitespace)
-            def normalize_for_compare(val):
-                if val is None:
-                    return ''
-                if isinstance(val, str):
-                    return val.strip()
-                return str(val).strip()
-            
-            current_normalized = normalize_for_compare(current_value)
-            original_normalized = normalize_for_compare(original_value)
-            
-            # If value changed, update it
-            if current_normalized != original_normalized:
-                update_data[field] = current_value
-    
-    # Map telegram_name to telegram_user for database (backward compatibility)
-    if 'telegram_name' in update_data:
-        telegram_name_value = update_data.pop('telegram_name')
-        # Only set telegram_user if telegram_name has a value
-        if telegram_name_value:
-            update_data['telegram_user'] = telegram_name_value
-        # If telegram_name is empty, also clear telegram_user
-        elif 'telegram_user' in update_data:
-            update_data['telegram_user'] = None
-    
-    try:
-
-        # This ensures we update all fields that were in user_data
-        clean_update_data = {}
-        for k, v in update_data.items():
-            # Keep all values except None (None means field wasn't set)
-            # Empty strings are valid and should be saved
-            if v is not None:
-                clean_update_data[k] = v
-        
-        response = client.table(TABLE_NAME).update(clean_update_data).eq("id", lead_id).execute()
-        
-        if response.data:
-            await query.edit_message_text(
-                "✅ <b>Лид успешно обновлен!</b>",
-                reply_markup=get_main_menu_keyboard(),
-                parse_mode='HTML'
-            )
-        else:
-            await query.edit_message_text(
-                "❌ Ошибка: Данные не были обновлены. Попробуйте снова.",
-                reply_markup=get_main_menu_keyboard()
-            )
-    
-    except Exception as e:
-        logger.error(f"Error updating lead: {e}", exc_info=True)
-        error_msg = "❌ Произошла ошибка при обновлении данных. Попробуйте позже или обратитесь к администратору."
-        await query.edit_message_text(
-            error_msg,
-            reply_markup=get_main_menu_keyboard()
-        )
-    
-    # Clean up
-    if user_id in user_data_store:
-        del user_data_store[user_id]
-    if user_id in user_data_store_access_time:
-        del user_data_store_access_time[user_id]
-    if 'editing_lead_id' in context.user_data:
-        del context.user_data['editing_lead_id']
-    if 'original_lead_data' in context.user_data:
-        del context.user_data['original_lead_data']
-    
-    return ConversationHandler.END
-
-async def edit_lead_entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Entry point for editing a lead - parses lead_id from callback_data"""
-    query = update.callback_query
-    if not query or not query.data:
-        logger.error("edit_lead_entry_callback: query or query.data is None")
-        return ConversationHandler.END
-    
-    data = query.data
-    
-    # Parse lead_id from callback_data (format: "edit_lead_123")
-    try:
-        lead_id = int(data.split("_")[-1])
-        return await edit_lead_callback(update, context, lead_id)
-    except (ValueError, IndexError) as e:
-        logger.error(f"Error parsing edit_lead callback: {e}")
-        await query.answer("❌ Ошибка: Неверный формат запроса.", show_alert=True)
-        return ConversationHandler.END
-
-async def edit_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancel editing lead"""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    
-    if user_id in user_data_store:
-        del user_data_store[user_id]
-    if user_id in user_data_store_access_time:
-        del user_data_store_access_time[user_id]
-    if 'editing_lead_id' in context.user_data:
-        del context.user_data['editing_lead_id']
-    if 'original_lead_data' in context.user_data:
-        del context.user_data['original_lead_data']
-    
-    await query.edit_message_text(
-        "❌ Редактирование отменено.",
-        reply_markup=get_main_menu_keyboard()
-    )
-    return ConversationHandler.END
-
-# Edit field callbacks
-async def edit_field_fullname_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'fullname', 'Клиент', EDIT_FULLNAME)
-
-async def edit_field_fb_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'facebook_link', 'Facebook Ссылка', EDIT_FB_LINK)
-
-async def edit_field_telegram_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'telegram_name', 'Тег Telegram', EDIT_TELEGRAM_NAME)
-
-async def edit_field_telegram_id_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'telegram_id', 'Telegram ID', EDIT_TELEGRAM_ID)
-
-async def edit_field_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return await edit_field_callback(update, context, 'manager_name', 'Manager Name', EDIT_MANAGER_NAME)
-
-# Flask routes
-@app.route('/')
-def index():
-    """Health check endpoint for Koyeb"""
-    return jsonify({
-        "status": "ok",
-        "service": "telegram-bot",
-        "timestamp": datetime.utcnow().isoformat()
-    }), 200
-
-@app.route('/health')
-def health():
-    """Health check endpoint (alias for compatibility)"""
-    return jsonify({
-        "status": "ok",
-        "service": "telegram-bot",
-        "timestamp": datetime.utcnow().isoformat()
-    }), 200
-
-@app.route('/ready')
-def ready():
-    """Readiness probe endpoint for Koyeb"""
-    checks = {
-        "telegram_app": telegram_app is not None,
-        "supabase_client": supabase is not None,
-        "telegram_event_loop": telegram_event_loop is not None and telegram_event_loop.is_running() if telegram_event_loop else False
-    }
-    
-    all_ready = all(checks.values())
-    status_code = 200 if all_ready else 503
-    
-    return jsonify({
-        "status": "ready" if all_ready else "not ready",
-        "checks": checks,
-        "timestamp": datetime.utcnow().isoformat()
-    }), status_code
-
-def cleanup_on_shutdown():
-    """Cleanup resources on shutdown"""
-    global shutdown_requested, telegram_app, telegram_event_loop, supabase
-    
-    shutdown_requested = True
-    
-    try:
-        # Stop Telegram app
-        if telegram_app:
-            import asyncio
-            if telegram_event_loop and telegram_event_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    telegram_app.stop(),
-                    telegram_event_loop
-                )
-                asyncio.run_coroutine_threadsafe(
-                    telegram_app.shutdown(),
-                    telegram_event_loop
-                )
-    except Exception as e:
-        logger.error(f"Error stopping Telegram app: {e}", exc_info=True)
-    
-    # Clear cache
-    uniqueness_cache.clear()
-    
-
-def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown"""
-    def signal_handler(signum, frame):
-        cleanup_on_shutdown()
-        sys.exit(0)
-    
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Handle incoming Telegram updates via webhook"""
-    try:
-        json_data = request.get_json()
-        if json_data:
-            
-            # Check if telegram_app is initialized
-            if telegram_app is None:
-                logger.error("Telegram app is not initialized yet")
-                return "Service not ready", 503
-            
-            update = Update.de_json(json_data, telegram_app.bot)
-            
-            # Process update asynchronously using the telegram event loop
-            import asyncio
-            if telegram_event_loop and telegram_event_loop.is_running():
-                # Schedule update processing in the telegram event loop
-                asyncio.run_coroutine_threadsafe(
-                    telegram_app.process_update(update),
-                    telegram_event_loop
-                )
-            else:
-                # Fallback: process synchronously if loop not ready
-                logger.warning("Telegram event loop not ready, processing update synchronously")
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(telegram_app.process_update(update))
-                loop.close()
-        else:
-            logger.warning("Received empty webhook request")
-        return "OK", 200
-    except Exception as e:
-        logger.error(f"Error processing webhook: {e}", exc_info=True)
-        return "Error", 500
-
-async def setup_webhook():
-    """Set up the webhook for Telegram bot"""
-    try:
-        webhook_url = f"{WEBHOOK_URL}/webhook"
-        # Drop pending updates to clear old states on deploy
-        await telegram_app.bot.set_webhook(
-            url=webhook_url,
-            drop_pending_updates=True  # Сбрасывает все ожидающие обновления
-        )
-        logger.info("Webhook set successfully with pending updates dropped")
-    except Exception as e:
-        logger.error(f"Error setting webhook: {e}")
-
-# Initialize Telegram application
-telegram_app = None
-telegram_event_loop = None
-
-def initialize_telegram_app():
-    """Initialize Telegram app - called on module import (needed for gunicorn)"""
-    global telegram_app, telegram_event_loop, user_data_store, user_data_store_access_time
-    
-    # Clear all user data stores on startup (fresh start after deploy)
-    user_data_store.clear()
-    user_data_store_access_time.clear()
-    logger.info("Cleared user_data_store and user_data_store_access_time on startup")
-    
-    # Validate environment variables first
-    if not TELEGRAM_BOT_TOKEN:
-        logger.error("TELEGRAM_BOT_TOKEN not found - Telegram app will not be initialized")
-        return
-    
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL not found - Telegram app will not be initialized")
-        return
-    
-    
-    try:
-        # Create Telegram app
-        create_telegram_app()
-    except Exception as e:
-        logger.error(f"Failed to create Telegram app: {e}", exc_info=True)
-        return
-    
-    # Initialize Telegram bot in a separate thread
-    import asyncio
-    import threading
-    
-    def run_telegram_setup():
-        """Run async webhook setup and start update processing in a separate thread"""
-        global telegram_event_loop
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            telegram_event_loop = loop  # Save reference for webhook
-            
-            loop.run_until_complete(telegram_app.initialize())
-            
-            loop.run_until_complete(setup_webhook())
-            
-            # Start processing updates
-            loop.run_until_complete(telegram_app.start())
-            
-            # Setup keep-alive scheduler after bot is started
-            setup_keep_alive_scheduler()
-            
-            # Keep the loop running to process updates
-            loop.run_forever()
-        except Exception as e:
-            logger.error(f"Error in Telegram setup thread: {e}", exc_info=True)
-    
-    # Start webhook setup in background
-    setup_thread = threading.Thread(target=run_telegram_setup)
-    setup_thread.daemon = True
-    setup_thread.start()
-    
-
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle errors in Telegram handlers"""
-    logger.error(f"Exception while handling an update: {context.error}", exc_info=context.error)
-    
-    # Extra diagnostics for tag-related flows
-    try:
-        from telegram import Update as TgUpdate  # type: ignore
-        if isinstance(update, TgUpdate) and update.effective_user:
-            user_id = update.effective_user.id
-            log_conversation_state(user_id, context, prefix="[ERROR_STATE]")
-    except Exception as state_err:
-        logger.error(f"[ERROR_STATE] Failed to log state in error_handler: {state_err}", exc_info=True)
-    
-    # Try to notify user if update is available
-    # Use direct calls without retry to avoid infinite recursion
-    if update and isinstance(update, Update):
-        try:
-            if update.message:
-                try:
-                    await update.message.reply_text(
-                        "⚠️ Произошла временная ошибка. Попробуйте снова через несколько секунд."
-                    )
-                except Exception:
-                    pass  # Silently fail if we can't send error message
-            elif update.callback_query:
-                try:
-                    await update.callback_query.answer(
-                        text="⚠️ Временная ошибка. Попробуйте снова.",
-                        show_alert=True
-                    )
-                except Exception:
-                    pass  # Silently fail if we can't send error message
-        except Exception as e:
-            logger.error(f"Failed to send error message to user: {e}")
-
-def create_telegram_app():
-    """Create and configure Telegram application"""
-    global telegram_app
-    
-    # Create application with timeout settings
-    request = HTTPXRequest(connection_pool_size=8, connect_timeout=10.0, read_timeout=10.0)
-    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).request(request).build()
-    
-    # Add error handler FIRST (before other handlers)
-    telegram_app.add_error_handler(error_handler)
-    
-    # Add command handlers
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("q", quit_command))
-    telegram_app.add_handler(CommandHandler("help", help_command))
-    # Note: /q command has high priority and will work from any state
-    # /tag is handled via tag_conv ConversationHandler entry_points
-
-    async def debug_log_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Global debug logger for all updates (does not interfere with handlers)."""
-        try:
-            user_id = update.effective_user.id if getattr(update, "effective_user", None) else None
-            if getattr(update, "message", None):
-                msg = update.message
-                is_forwarded = bool(
-                    msg.forward_from or msg.forward_from_chat or msg.forward_sender_name
-                )
-                # ADD DETAILED LOGGING FOR TEXT MESSAGES (especially for tag PIN input)
-                if msg.text and not msg.text.startswith('/'):
-                    logger.info(
-                        f"[UPDATE] type=message user_id={user_id} "
-                        f"text='{msg.text}' is_forwarded={is_forwarded} "
-                        f"is_command=False"
-                    )
-                    # Log conversation state for text messages to track tag flow
-                    if user_id is not None:
-                        log_conversation_state(user_id, context, prefix="[UPDATE_TEXT_MSG]")
-                else:
-                    logger.info(
-                        f"[UPDATE] type=message user_id={user_id} "
-                        f"text='{msg.text or ''}' is_forwarded={is_forwarded}"
-                    )
-            elif getattr(update, "callback_query", None):
-                q = update.callback_query
-                logger.info(
-                    f"[UPDATE] type=callback user_id={user_id} data='{q.data}'"
-                )
-            else:
-                logger.info(f"[UPDATE] type=other raw_update={update}")
-
-            if user_id is not None and not (getattr(update, "message", None) and update.message.text and not update.message.text.startswith('/')):
-                # Log state for non-text messages (already logged above for text messages)
-                log_conversation_state(user_id, context, prefix="[UPDATE_STATE]")
-        except Exception as e:
-            logger.error(f"[UPDATE] Failed to log update: {e}", exc_info=True)
-
-    # Global debug logger - register early, but it never returns states so it won't affect flows
-    telegram_app.add_handler(MessageHandler(filters.ALL, debug_log_update), group=99)
-    
-    # Global handler for forwarded messages (register BEFORE ConversationHandlers)
-    # This allows forwarding messages to work from any state
-    # The handler returns None if user is already in add flow, allowing add_field_input to handle it
-    forwarded_message_handler = MessageHandler(
-        filters.FORWARDED,
-        handle_forwarded_message
-    )
-    telegram_app.add_handler(forwarded_message_handler)
-    
-    # Smart check conversation handler (register FIRST to have priority)
-    smart_check_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(check_menu_callback, pattern="^check_menu$")],
-        states={
-            SMART_CHECK_INPUT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, smart_check_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ]
-        },
-        fallbacks=[
-            CommandHandler("q", quit_command),
-            CommandHandler("start", start_command),
-        ],
-        per_message=False,
-    )
-    
-    # Old conversation handlers for checking (kept for backward compatibility, but not registered)
-    # These are no longer used but kept in case we need them in the future
-    # check_telegram_conv = ConversationHandler(
-    #     entry_points=[CallbackQueryHandler(check_telegram_callback, pattern="^check_telegram$")],
-    #     states={
-    #         CHECK_BY_TELEGRAM: [
-    #             MessageHandler(filters.TEXT & ~filters.COMMAND, check_telegram_input),
-    #             CommandHandler("q", quit_command),
-    #             CommandHandler("start", start_command),
-    #         ]
-    #     },
-    #     fallbacks=[
-    #         CommandHandler("q", quit_command), 
-    #         CommandHandler("start", start_command),
-    #         CallbackQueryHandler(check_menu_callback, pattern="^check_menu$"),
-    #     ],
-    #     per_message=False,
-    # )
-    # 
-    # check_fb_link_conv = ConversationHandler(
-    #     entry_points=[CallbackQueryHandler(check_fb_link_callback, pattern="^check_fb_link$")],
-    #     states={
-    #         CHECK_BY_FB_LINK: [
-    #             MessageHandler(filters.TEXT & ~filters.COMMAND, check_fb_link_input),
-    #             CommandHandler("q", quit_command),
-    #             CommandHandler("start", start_command),
-    #         ]
-    #     },
-    #     fallbacks=[
-    #         CommandHandler("q", quit_command), 
-    #         CommandHandler("start", start_command),
-    #         CallbackQueryHandler(check_menu_callback, pattern="^check_menu$"),
-    #     ],
-    #     per_message=False,
-    # )
-    # 
-    # check_telegram_id_conv = ConversationHandler(
-    #     entry_points=[CallbackQueryHandler(check_telegram_id_callback, pattern="^check_telegram_id$")],
-    #     states={
-    #         CHECK_BY_TELEGRAM_ID: [
-    #             MessageHandler(filters.TEXT & ~filters.COMMAND, check_telegram_id_input),
-    #             CommandHandler("q", quit_command),
-    #             CommandHandler("start", start_command),
-    #         ]
-    #     },
-    #     fallbacks=[
-    #         CommandHandler("q", quit_command), 
-    #         CommandHandler("start", start_command),
-    #         CallbackQueryHandler(check_menu_callback, pattern="^check_menu$"),
-    #     ],
-    #     per_message=False,
-    # )
-    # 
-    # check_fullname_conv = ConversationHandler(
-    #     entry_points=[CallbackQueryHandler(check_fullname_callback, pattern="^check_fullname$")],
-    #     states={
-    #         CHECK_BY_FULLNAME: [
-    #             MessageHandler(filters.TEXT & ~filters.COMMAND, check_fullname_input),
-    #             CommandHandler("q", quit_command),
-    #             CommandHandler("start", start_command),
-    #         ]
-    #     },
-    #     fallbacks=[
-    #         CommandHandler("q", quit_command), 
-    #         CommandHandler("start", start_command),
-    #         CallbackQueryHandler(check_menu_callback, pattern="^check_menu$"),
-    #     ],
-    #     per_message=False,
-    # )
-    
-    # Conversation handler for adding - sequential flow
-    add_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
-            CallbackQueryHandler(forwarded_add_callback, pattern="^forwarded_add$"),
-            # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
-            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
-            # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
-            # This handles callbacks like add_skip, add_back, add_save when flow was started via forwarded message
-            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel|add_save)$")
-        ],
-        states={
-            ADD_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_FB_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_TELEGRAM_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_TELEGRAM_ID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_REVIEW: [
-                CallbackQueryHandler(add_save_callback, pattern="^add_save$"),
-                CallbackQueryHandler(edit_fullname_from_review_callback, pattern="^edit_fullname_from_review$"),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-        },
-        fallbacks=[CommandHandler("q", quit_command), CommandHandler("start", start_command)],
-        per_message=False,
-    )
-    
-    telegram_app.add_handler(smart_check_conv)  # Smart check with auto-detection
-    
-    # Edit conversation handler - register with other ConversationHandlers for priority
-    edit_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(edit_lead_entry_callback, pattern="^edit_lead_\\d+$"),
-            CallbackQueryHandler(edit_field_fullname_callback, pattern="^edit_field_fullname$"),
-            CallbackQueryHandler(edit_field_fb_link_callback, pattern="^edit_field_fb_link$"),
-            CallbackQueryHandler(edit_field_telegram_name_callback, pattern="^edit_field_telegram_name$"),
-            CallbackQueryHandler(edit_field_telegram_id_callback, pattern="^edit_field_telegram_id$"),
-            CallbackQueryHandler(edit_field_manager_callback, pattern="^edit_field_manager$"),
-            CallbackQueryHandler(edit_save_callback, pattern="^edit_save$"),
-            CallbackQueryHandler(edit_cancel_callback, pattern="^edit_cancel$"),
-        ],
-        states={
-            EDIT_PIN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_pin_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_MENU: [
-                CallbackQueryHandler(edit_field_fullname_callback, pattern="^edit_field_fullname$"),
-                CallbackQueryHandler(edit_field_fb_link_callback, pattern="^edit_field_fb_link$"),
-                CallbackQueryHandler(edit_field_telegram_name_callback, pattern="^edit_field_telegram_name$"),
-                CallbackQueryHandler(edit_field_telegram_id_callback, pattern="^edit_field_telegram_id$"),
-                CallbackQueryHandler(edit_field_manager_callback, pattern="^edit_field_manager$"),
-                CallbackQueryHandler(edit_save_callback, pattern="^edit_save$"),
-                CallbackQueryHandler(edit_cancel_callback, pattern="^edit_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_FB_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_TELEGRAM_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_TELEGRAM_ID: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            EDIT_MANAGER_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("q", quit_command),
-            CommandHandler("start", start_command),
-            CommandHandler("skip", lambda u, c: edit_field_input(u, c)),
-        ],
-        per_message=False,
-    )
-    telegram_app.add_handler(edit_conv)
-    
-    # Tag conversation handler - for changing manager_tag
-    tag_conv = ConversationHandler(
-        entry_points=[
-            CommandHandler("tag", tag_command),
-            CallbackQueryHandler(tag_manager_callback, pattern="^tag_mgr_\\d+$")
-        ],
-        states={
-            TAG_PIN: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, tag_pin_input),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            TAG_SELECT_MANAGER: [
-                CallbackQueryHandler(tag_manager_callback, pattern="^tag_mgr_\\d+$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            TAG_ENTER_NEW: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, tag_enter_new),
-                CallbackQueryHandler(tag_confirm_callback, pattern="^tag_confirm$"),
-                CallbackQueryHandler(tag_cancel_callback, pattern="^tag_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-        },
-        fallbacks=[
-            CommandHandler("q", quit_command),
-            CommandHandler("start", start_command),
-        ],
-        per_message=False,
-    )
-    telegram_app.add_handler(tag_conv)
-
-    # Old check handlers are no longer registered (commented out above)
-    # IMPORTANT: Order matters. `tag_conv` must be registered BEFORE `add_conv`,
-    # otherwise `add_conv` entry_point `check_add_state_entry` can intercept PIN input.
-    # `add_conv` must be registered BEFORE `photo_message_handler` so ConversationHandler
-    # gets photos first when user is in add flow.
-    telegram_app.add_handler(add_conv)
-    
-    # Global handler for regular photo messages (register AFTER add_conv ConversationHandler)
-    # This handles regular (not forwarded) photo messages to start add lead flow
-    # when user is NOT already in add flow
-    photo_message_handler = MessageHandler(
-        filters.PHOTO & ~filters.FORWARDED,
-        handle_photo_message
-    )
-    telegram_app.add_handler(photo_message_handler)
-    
-    # Add callback query handler for forwarded message check action (register BEFORE button_callback)
-    # Note: forwarded_add_callback is registered in add_conv entry_points, so no need to register separately
-    telegram_app.add_handler(CallbackQueryHandler(forwarded_check_callback, pattern="^forwarded_check$"))
-    
-    # Add callback query handler for menu navigation buttons
-    # Registered AFTER ConversationHandlers so they have priority
-    # Note: check_menu is now handled by smart_check_conv ConversationHandler
-    # Note: add_new is included here as fallback, but ConversationHandler should catch it first
-    telegram_app.add_handler(CallbackQueryHandler(button_callback, pattern="^(main_menu|add_menu|add_new)$"))
-    
-    # Add handler for unknown commands during conversations (must be after command handlers)
-    # Exclude /start, /q, /skip, and /tag (skip is handled by ConversationHandlers, tag should interrupt any process)
-    telegram_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex("^(/start|/q|/skip|/tag)$"), unknown_command_handler))
-    
-    # Add global fallback for unknown callback queries (must be last, after all ConversationHandlers)
-    telegram_app.add_handler(CallbackQueryHandler(unknown_callback_handler))
-    
-    return telegram_app
-
-# Setup signal handlers for graceful shutdown
-setup_signal_handlers()
-
-async def single_keep_alive():
-    """Keep bot alive by calling bot.get_me() - works even in Sleeping state"""
-    global telegram_app
-    if telegram_app is None or telegram_app.bot is None:
-        logger.warning("Keep-alive: Telegram app not initialized")
-        return
-    
-    try:
-        await telegram_app.bot.get_me()
-        logger.debug("Keep-alive OK: bot.get_me() successful")
-    except Exception as e:
-        logger.warning(f"Keep-alive failed: {e}")
-
-def setup_keep_alive_scheduler():
-    """Setup APScheduler to keep bot alive"""
-    global scheduler, telegram_event_loop
-    
-    if telegram_event_loop is None:
-        logger.warning("Keep-alive scheduler: Telegram event loop not ready, will retry later")
-        return
-    
-    try:
-        # Create scheduler with the telegram event loop
-        scheduler = AsyncIOScheduler(event_loop=telegram_event_loop)
-        
-        # Add job to call bot.get_me() every 5 minutes
-        scheduler.add_job(
-            single_keep_alive,
-            trigger=IntervalTrigger(minutes=5),
-            id='keep_alive',
-            name='Keep bot alive',
-            replace_existing=True
-        )
-        
-        scheduler.start()
-        logger.info("Keep-alive scheduler started: bot.get_me() will be called every 5 minutes")
-    except Exception as e:
-        logger.error(f"Failed to setup keep-alive scheduler: {e}", exc_info=True)
-
-# Initialize Telegram app when module is imported (needed for gunicorn)
-# This ensures telegram_app is initialized even when running with gunicorn
-try:
-    initialize_telegram_app()
-except Exception as e:
-    logger.error(f"Failed to initialize Telegram app on module import: {e}", exc_info=True)
-
-if __name__ == '__main__':
-    # Validate environment variables
-    missing_vars = []
-    
-    if not TELEGRAM_BOT_TOKEN:
-        missing_vars.append("TELEGRAM_BOT_TOKEN")
-    
-    if not WEBHOOK_URL:
-        missing_vars.append("WEBHOOK_URL")
-    
-    if not SUPABASE_URL:
-        missing_vars.append("SUPABASE_URL")
-    
-    if not SUPABASE_KEY:
-        missing_vars.append("SUPABASE_KEY")
-    
-    if missing_vars:
-        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
-        logger.error("Please set all required environment variables in Koyeb dashboard")
-        exit(1)
-    
-    # Note: Supabase client will be initialized lazily on first use
-    
-    # Telegram app is already initialized by initialize_telegram_app() above
-    # Give it a moment to initialize
-    import time
-    time.sleep(2)
-    
-    # For production, gunicorn will be used (see Procfile)
-    # This code is kept for local development
-    logger.warning("For production, use: gunicorn -w 1 -b 0.0.0.0:$PORT main:app")
-    app.run(host='0.0.0.0', port=PORT, debug=False)
