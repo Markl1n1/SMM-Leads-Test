@@ -509,19 +509,26 @@ def detect_search_type(value: str) -> tuple[str, str]:
         if normalized:
             return 'telegram_id', normalized
     
-    # 3. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
-    # Remove @ if present
-    username_candidate = value_stripped.replace('@', '').strip()
-    # Check if it contains only allowed characters for Telegram username
-    if username_candidate and not ' ' in username_candidate:
-        # Check if it's a valid Telegram username format (alphanumeric, underscores, dots, hyphens)
-        if all(c.isalnum() or c in ['_', '.', '-'] for c in username_candidate):
-            # Normalize it
-            is_valid_tg, _, tg_normalized = validate_telegram_name(username_candidate)
-            if is_valid_tg:
-                return 'telegram_user', tg_normalized
+    # 3. Check if value contains Cyrillic characters - if yes, prioritize as fullname
+    # Cyrillic characters are in range \u0400-\u04FF
+    has_cyrillic = any('\u0400' <= c <= '\u04FF' for c in value_stripped)
     
-    # 4. Check for fullname (contains spaces or letters, not just digits)
+    # 4. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
+    # Skip if contains Cyrillic - it's definitely not a Telegram username
+    if not has_cyrillic:
+        # Remove @ if present
+        username_candidate = value_stripped.replace('@', '').strip()
+        # Check if it contains only allowed characters for Telegram username
+        if username_candidate and not ' ' in username_candidate:
+            # Check if it's a valid Telegram username format (alphanumeric, underscores, dots, hyphens)
+            # Also check that it's not too short (Telegram usernames are usually at least 5 chars)
+            if len(username_candidate) >= 5 and all(c.isalnum() or c in ['_', '.', '-'] for c in username_candidate):
+                # Normalize it
+                is_valid_tg, _, tg_normalized = validate_telegram_name(username_candidate)
+                if is_valid_tg:
+                    return 'telegram_user', tg_normalized
+    
+    # 5. Check for fullname (contains spaces or letters, not just digits)
     # If it contains spaces or has letters (not just digits), it's likely a name
     if ' ' in value_stripped or any(c.isalpha() for c in value_stripped):
         # Normalize text field
@@ -529,7 +536,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
         if normalized and len(normalized) >= 3:  # Minimum 3 characters for name search
             return 'fullname', normalized
     
-    # 5. Unknown - cannot determine type
+    # 6. Unknown - cannot determine type
     return 'unknown', value_stripped
 
 def get_field_format_requirements(field_name: str) -> str:
