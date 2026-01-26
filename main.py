@@ -361,15 +361,7 @@ def validate_facebook_link(link: str) -> tuple[bool, str, str]:
             is_facebook_url = True
     
     if not is_facebook_url:
-        error_msg = (
-            "❌ Неверный формат Facebook ссылки.\n\n"
-            "📋 Примеры допустимых вариантов:\n"
-            "• <code>https://www.facebook.com/username</code>\n"
-            "• <code>www.facebook.com/username</code>\n"
-            "• <code>facebook.com/username</code>\n"
-            "• <code>https://m.facebook.com/profile.php?id=123456789012345</code>\n\n"
-            "💡 Можно вставлять ссылку целиком, бот сам извлечёт username или ID."
-        )
+        error_msg = "Неверный формат Facebook ссылки."
         return False, error_msg, ""
     
     # Remove http:// or https:// if present
@@ -466,15 +458,7 @@ def validate_facebook_link(link: str) -> tuple[bool, str, str]:
             if cleaned_username:
                 return True, "", cleaned_username
     
-    error_msg = (
-        "❌ Неверный формат Facebook ссылки.\n\n"
-        "📋 Примеры допустимых вариантов:\n"
-        "• <code>https://www.facebook.com/username</code>\n"
-        "• <code>www.facebook.com/username</code>\n"
-        "• <code>facebook.com/username</code>\n"
-        "• <code>https://m.facebook.com/profile.php?id=123456789012345</code>\n\n"
-        "💡 Можно вставлять ссылку целиком, бот сам извлечёт username или ID."
-    )
+    error_msg = "Неверный формат Facebook ссылки."
     return False, error_msg, ""
 
 def validate_telegram_name(tg_name: str) -> tuple[bool, str, str]:
@@ -572,13 +556,14 @@ def get_field_format_requirements(field_name: str) -> str:
             "<code>Maria</code>"
         ),
         'facebook_link': (
-            "Примеры:\n"
-            "<code>https://www.facebook.com/username</code>\n"
-            "<code>www.facebook.com/username</code>\n"
-            "<code>facebook.com/username</code>\n"
-            "<code>https://www.facebook.com/profile.php?id=123456789012345</code>\n"
-            "<code>https://m.facebook.com/username</code>\n\n"
-            "‼️ Важно: добавляйте только прямую ссылку на профиль (без фото, информации и прочих вкладок).\n\n"
+            "📋 <b>Примеры допустимых вариантов:</b>\n"
+            "• <code>https://www.facebook.com/username</code>\n"
+            "• <code>www.facebook.com/username</code>\n"
+            "• <code>facebook.com/username</code>\n"
+            "• <code>https://m.facebook.com/profile.php?id=123456789012345</code>\n"
+            "• <code>https://m.facebook.com/username</code>\n\n"
+            "💡 Можно вставлять ссылку целиком, бот сам извлечёт username или ID.\n\n"
+            "‼️ <b>Важно:</b> добавляйте только прямую ссылку на профиль (без фото, информации и прочих вкладок)."
         ),
         'telegram_name': (
             "📋 <b>Требования к формату:</b>\n"
@@ -1513,13 +1498,22 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Check if user is already in add flow
     # If yes, let ConversationHandler handle it (it has photo handler in states)
-    # Проверяем как current_state, так и current_field для более надежной проверки
+    # Проверяем как current_state, так и current_field, и внутренние ключи ConversationHandler
+    has_conversation_keys = any(
+        key.startswith('_conversation_') 
+        for key in (context.user_data.keys() if context.user_data else [])
+    )
     is_in_add_flow = (
         (user_id in user_data_store and current_state in add_states) or
-        (user_id in user_data_store and context.user_data.get('current_field') in ['fullname', 'facebook_link', 'telegram_name', 'telegram_id', 'review'])
+        (user_id in user_data_store and context.user_data.get('current_field') in ['fullname', 'facebook_link', 'telegram_name', 'telegram_id', 'review']) or
+        (has_conversation_keys and current_state in add_states)
     )
     if is_in_add_flow:
-        logger.info(f"[PHOTO_MESSAGE] User {user_id} is already in add flow (state={current_state}, field={context.user_data.get('current_field')}), letting ConversationHandler handle photo")
+        logger.info(
+            f"[PHOTO_MESSAGE] User {user_id} is already in add flow "
+            f"(state={current_state}, field={context.user_data.get('current_field')}, "
+            f"has_conversation_keys={has_conversation_keys}), letting ConversationHandler handle photo"
+        )
         return None
     
     # Extract photo
@@ -2628,6 +2622,14 @@ async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Save message ID for cleanup
         if query.message:
             await save_add_message(update, context, query.message.message_id)
+        
+        logger.info(f"[ADD_NEW] Returning ADD_FULLNAME for user {user_id}, ConversationHandler should be active")
+        # Проверить, что user_data_store существует
+        if user_id not in user_data_store:
+            logger.error(f"[ADD_NEW] CRITICAL: user_data_store[{user_id}] does not exist after initialization!")
+        else:
+            logger.info(f"[ADD_NEW] user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
+        
         return ADD_FULLNAME
     except Exception as e:
         logger.error(f"Error in add_new_callback: {e}", exc_info=True)
@@ -4428,7 +4430,16 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
     current_state = context.user_data.get('current_state')
     current_field = context.user_data.get('current_field')
     
-    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state}, field={current_field})")
+    # Добавить проверку внутренних ключей ConversationHandler
+    has_conversation_keys = any(
+        key.startswith('_conversation_') 
+        for key in (context.user_data.keys() if context.user_data else [])
+    )
+    logger.info(
+        f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow "
+        f"(state={current_state}, field={current_field}, has_conversation_keys={has_conversation_keys}, "
+        f"user_data_store_exists={user_id in user_data_store})"
+    )
     
     # Проверить, что user_data_store существует
     if user_id not in user_data_store:
