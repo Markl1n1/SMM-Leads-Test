@@ -6697,14 +6697,6 @@ def create_telegram_app():
     )
     telegram_app.add_handler(forwarded_message_handler)
     
-    # Global handler for regular photo messages (register AFTER forwarded messages handler)
-    # This handles regular (not forwarded) photo messages to start add lead flow
-    photo_message_handler = MessageHandler(
-        filters.PHOTO & ~filters.FORWARDED,
-        handle_photo_message
-    )
-    telegram_app.add_handler(photo_message_handler)
-    
     # Smart check conversation handler (register FIRST to have priority)
     smart_check_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(check_menu_callback, pattern="^check_menu$")],
@@ -6858,9 +6850,6 @@ def create_telegram_app():
         per_message=False,
     )
     
-    # Register ConversationHandlers FIRST (before button_callback) to have priority.
-    # IMPORTANT: Order matters. `tag_conv` must be registered BEFORE `add_conv`,
-    # otherwise `add_conv` entry_point `check_add_state_entry` can intercept PIN input.
     telegram_app.add_handler(smart_check_conv)  # Smart check with auto-detection
     
     # Edit conversation handler - register with other ConversationHandlers for priority
@@ -6961,8 +6950,20 @@ def create_telegram_app():
     telegram_app.add_handler(tag_conv)
 
     # Old check handlers are no longer registered (commented out above)
-    # Register AFTER tag_conv so /tag PIN flow has priority over add flow entry points.
+    # IMPORTANT: Order matters. `tag_conv` must be registered BEFORE `add_conv`,
+    # otherwise `add_conv` entry_point `check_add_state_entry` can intercept PIN input.
+    # `add_conv` must be registered BEFORE `photo_message_handler` so ConversationHandler
+    # gets photos first when user is in add flow.
     telegram_app.add_handler(add_conv)
+    
+    # Global handler for regular photo messages (register AFTER add_conv ConversationHandler)
+    # This handles regular (not forwarded) photo messages to start add lead flow
+    # when user is NOT already in add flow
+    photo_message_handler = MessageHandler(
+        filters.PHOTO & ~filters.FORWARDED,
+        handle_photo_message
+    )
+    telegram_app.add_handler(photo_message_handler)
     
     # Add callback query handler for forwarded message check action (register BEFORE button_callback)
     # Note: forwarded_add_callback is registered in add_conv entry_points, so no need to register separately
