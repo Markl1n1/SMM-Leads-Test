@@ -840,6 +840,10 @@ async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str 
                 ext = "webp"
             elif file_path_lower.endswith(".jpeg") or file_path_lower.endswith(".jpg"):
                 ext = "jpg"
+            elif file_path_lower.endswith(".gif"):
+                ext = "gif"
+            elif file_path_lower.endswith(".bmp"):
+                ext = "bmp"
         
         # 3) Download file content as bytes
         file_bytes = await tg_file.download_as_bytearray()
@@ -4377,6 +4381,59 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
     # Return current state to continue the flow
     return current_state
 
+async def handle_document_during_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle document messages during add flow - save photo if it's an image and continue"""
+    if not update.message or not update.message.document:
+        logger.warning("[DOCUMENT_DURING_ADD] update.message or document is None")
+        return ConversationHandler.END
+    
+    user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    document = update.message.document
+    logger.info(f"[DOCUMENT_DURING_ADD] User {user_id} sent document during add flow (state={current_state}, field={context.user_data.get('current_field')}, file_name={document.file_name}, mime_type={document.mime_type})")
+    
+    # Check if document is an image
+    is_image = False
+    if document.mime_type:
+        is_image = document.mime_type.startswith('image/')
+    elif document.file_name:
+        file_name_lower = document.file_name.lower()
+        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp']
+        is_image = any(file_name_lower.endswith(ext) for ext in image_extensions)
+    
+    if not is_image:
+        logger.info(f"[DOCUMENT_DURING_ADD] Document is not an image, ignoring (file_name={document.file_name}, mime_type={document.mime_type})")
+        await update.message.reply_text(
+            "⚠️ Пожалуйста, отправьте изображение (JPG, PNG, GIF, WEBP).\n\n"
+            "Продолжайте заполнение полей."
+        )
+        return current_state
+    
+    # Проверить, что user_data_store существует
+    if user_id not in user_data_store:
+        logger.warning(f"[DOCUMENT_DURING_ADD] user_data_store does not exist for user {user_id}, creating it")
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+    
+    # Extract document file_id
+    document_file_id = document.file_id
+    
+    # Save document file_id to user_data_store (use same key as photo)
+    user_data_store[user_id]['photo_file_id'] = document_file_id
+    user_data_store_access_time[user_id] = time.time()
+    
+    logger.info(f"[DOCUMENT_DURING_ADD] Saved photo_file_id={document_file_id} for user {user_id} in user_data_store")
+    
+    # Notify user that photo was saved
+    await update.message.reply_text(
+        "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
+        "Продолжайте заполнение полей."
+    )
+    
+    # Return current state to continue the flow
+    return current_state
+
 async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle 'Add' button for forwarded message - go directly to Review"""
     query = update.callback_query
@@ -6581,6 +6638,7 @@ def create_telegram_app():
             ADD_FULLNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
@@ -6589,6 +6647,7 @@ def create_telegram_app():
             ADD_FB_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6598,6 +6657,7 @@ def create_telegram_app():
             ADD_TELEGRAM_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6607,6 +6667,7 @@ def create_telegram_app():
             ADD_TELEGRAM_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6617,6 +6678,7 @@ def create_telegram_app():
                 CallbackQueryHandler(add_save_callback, pattern="^add_save$"),
                 CallbackQueryHandler(edit_fullname_from_review_callback, pattern="^edit_fullname_from_review$"),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
