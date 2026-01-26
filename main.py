@@ -4414,8 +4414,9 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
     
     user_id = update.effective_user.id
     current_state = context.user_data.get('current_state')
+    current_field = context.user_data.get('current_field')
     
-    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state}, field={context.user_data.get('current_field')})")
+    logger.info(f"[PHOTO_DURING_ADD] User {user_id} sent photo during add flow (state={current_state}, field={current_field})")
     
     # Проверить, что user_data_store существует
     if user_id not in user_data_store:
@@ -4433,14 +4434,54 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
     
     logger.info(f"[PHOTO_DURING_ADD] Saved photo_file_id={photo_file_id} for user {user_id} in user_data_store")
     
-    # Notify user that photo was saved
-    await update.message.reply_text(
-        "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
-        "Продолжайте заполнение полей."
-    )
-    
-    # Return current state to continue the flow
-    return current_state
+    # Check if we're on the first step (ADD_FULLNAME) and if there's a caption
+    if current_state == ADD_FULLNAME and update.message.caption:
+        # Extract and normalize caption text as fullname
+        caption_text = update.message.caption.strip()
+        normalized_fullname = normalize_text_field(caption_text)
+        
+        if normalized_fullname:
+            # Save fullname to user_data_store
+            user_data_store[user_id]['fullname'] = normalized_fullname
+            logger.info(f"[PHOTO_DURING_ADD] Extracted fullname from caption: '{normalized_fullname}' for user {user_id}")
+            
+            # Move to next step (ADD_FB_LINK)
+            context.user_data['current_field'] = 'facebook_link'
+            context.user_data['current_state'] = ADD_FB_LINK
+            context.user_data['add_step'] = 1
+            
+            # Get next field info
+            field_label = get_field_label('facebook_link')
+            _, _, current_step, total_steps = get_next_add_field('fullname')
+            requirements = get_field_format_requirements('facebook_link')
+            
+            # Notify user and ask for next field
+            await update.message.reply_text(
+                f"✅ Фото получено. Имя извлечено из текста: <code>{escape_html(normalized_fullname)}</code>\n\n"
+                f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+                f"📝 Введите {field_label}:\n\n{requirements}",
+                reply_markup=get_navigation_keyboard(is_optional=True, show_back=False),
+                parse_mode='HTML'
+            )
+            
+            return ADD_FB_LINK
+        else:
+            # Caption couldn't be normalized, stay on current step
+            logger.warning(f"[PHOTO_DURING_ADD] Could not normalize caption text: '{caption_text}' for user {user_id}")
+            await update.message.reply_text(
+                "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
+                "Продолжайте заполнение полей."
+            )
+            return ADD_FULLNAME
+    else:
+        # No caption or not on first step - just save photo and continue
+        await update.message.reply_text(
+            "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
+            "Продолжайте заполнение полей."
+        )
+        
+        # Return current state to continue the flow
+        return current_state
 
 async def handle_document_during_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle document messages during add flow - save photo if it's an image and continue"""
