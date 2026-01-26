@@ -6638,7 +6638,7 @@ def create_telegram_app():
             ADD_FULLNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
+                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
@@ -6647,7 +6647,7 @@ def create_telegram_app():
             ADD_FB_LINK: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
+                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6657,7 +6657,7 @@ def create_telegram_app():
             ADD_TELEGRAM_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
+                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6667,7 +6667,7 @@ def create_telegram_app():
             ADD_TELEGRAM_ID: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
+                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
@@ -6678,7 +6678,7 @@ def create_telegram_app():
                 CallbackQueryHandler(add_save_callback, pattern="^add_save$"),
                 CallbackQueryHandler(edit_fullname_from_review_callback, pattern="^edit_fullname_from_review$"),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.DOCUMENT & ~filters.FORWARDED, handle_document_during_add),
+                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
                 CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
                 CommandHandler("q", quit_command),
