@@ -2732,6 +2732,19 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
             except Exception as e:
                 logger.warning(f"[MULTI_FIELD_SEARCH] Error searching fullname: {e}")
         
+        # Search in manager_name (contains pattern, case-insensitive)
+        if normalized_fullname:
+            try:
+                pattern = f"%{normalized_fullname}%"
+                response = client.table(TABLE_NAME).select("*").ilike("manager_name", pattern).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+            except Exception as e:
+                logger.warning(f"[MULTI_FIELD_SEARCH] Error searching manager_name: {e}")
+        
         # Limit total results to 50
         all_results = all_results[:50]
         
@@ -3308,6 +3321,21 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in facebook_link field")
             except Exception as e:
                 logger.warning(f"[FULLNAME SEARCH] Error searching facebook_link: {e}")
+        
+        # Search in manager_name (contains pattern, case-insensitive) - always search here
+        if normalized_fullname:
+            try:
+                pattern = f"%{normalized_fullname}%"
+                logger.info(f"[FULLNAME SEARCH] Using pattern: '{pattern}' for field 'manager_name'")
+                response = client.table(TABLE_NAME).select("*").ilike("manager_name", pattern).order("created_at", desc=True).limit(10).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in manager_name field")
+            except Exception as e:
+                logger.warning(f"[FULLNAME SEARCH] Error searching manager_name: {e}")
         
         # Sort all results by created_at descending (newest first)
         all_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
