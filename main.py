@@ -3226,29 +3226,102 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     
     try:
-        # Search using ilike with contains pattern (case-insensitive)
-        # Limit to 10 results at DB level for better performance
-        # Sort by created_at descending (newest first)
-        # For ilike in Supabase Python client, use % as wildcard (SQL standard)
-        # Pattern: %escaped_value% - finds records where fullname contains the search value
-        # This works for both full matches and partial matches
-        pattern = f"%{escaped_search_value}%"
+        # Try to normalize values for different field types
+        # This allows searching across all fields even when user enters what looks like a fullname
+        normalized_tg_user = None
+        normalized_tg_id = None
+        normalized_fb_link = None
+        normalized_fullname = escaped_search_value  # Already normalized and escaped above
+        
+        # Try Telegram username normalization
+        is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
+        if is_valid_tg_user:
+            normalized_tg_user = tg_user_normalized
+            logger.info(f"[FULLNAME SEARCH] Value can also be normalized as telegram_user: '{normalized_tg_user}'")
+        
+        # Try Telegram ID normalization
+        if search_value.isdigit() and len(search_value) >= 5:
+            normalized_tg_id = normalize_telegram_id(search_value)
+            if normalized_tg_id:
+                logger.info(f"[FULLNAME SEARCH] Value can also be normalized as telegram_id: '{normalized_tg_id}'")
+        
+        # Try Facebook link normalization
+        is_valid_fb, _, fb_normalized = validate_facebook_link(search_value)
+        if is_valid_fb:
+            normalized_fb_link = fb_normalized
+            logger.info(f"[FULLNAME SEARCH] Value can also be normalized as facebook_link: '{normalized_fb_link}'")
+        
+        # Search across all fields where normalization succeeded
+        # Supabase Python client doesn't support .or() directly, so we use multiple queries and combine results
+        all_results = []
+        seen_ids = set()
+        
+        # Search in fullname (contains pattern, case-insensitive) - always search here
+        pattern = f"%{normalized_fullname}%"
         logger.info(f"[FULLNAME SEARCH] Using pattern: '{pattern}' for field 'fullname'")
-        logger.info(f"[FULLNAME SEARCH] Executing query: SELECT * FROM {TABLE_NAME} WHERE fullname ILIKE '{pattern}' ORDER BY created_at DESC LIMIT 10")
+        try:
+            response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).order("created_at", desc=True).limit(10).execute()
+            if response.data:
+                for item in response.data:
+                    if item.get('id') not in seen_ids:
+                        all_results.append(item)
+                        seen_ids.add(item.get('id'))
+                logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in fullname field")
+        except Exception as e:
+            logger.warning(f"[FULLNAME SEARCH] Error searching fullname: {e}")
         
-        response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).order("created_at", desc=True).limit(10).execute()
+        # Search in telegram_user (exact match) - if normalization succeeded
+        if normalized_tg_user:
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("telegram_user", normalized_tg_user).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in telegram_user field")
+            except Exception as e:
+                logger.warning(f"[FULLNAME SEARCH] Error searching telegram_user: {e}")
         
-        logger.info(f"[FULLNAME SEARCH] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
-        logger.info(f"[FULLNAME SEARCH] Response.data type: {type(response.data) if hasattr(response, 'data') else 'N/A'}")
-        logger.info(f"[FULLNAME SEARCH] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
+        # Search in telegram_id (exact match) - if normalization succeeded
+        if normalized_tg_id:
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("telegram_id", normalized_tg_id).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in telegram_id field")
+            except Exception as e:
+                logger.warning(f"[FULLNAME SEARCH] Error searching telegram_id: {e}")
         
-        if hasattr(response, 'data') and response.data:
-            logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results for pattern '{pattern}'")
-            for idx, result in enumerate(response.data[:5], 1):  # Log first 5 results
+        # Search in facebook_link (exact match) - if normalization succeeded
+        if normalized_fb_link:
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("facebook_link", normalized_fb_link).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[FULLNAME SEARCH] ✅ Found {len(response.data)} results in facebook_link field")
+            except Exception as e:
+                logger.warning(f"[FULLNAME SEARCH] Error searching facebook_link: {e}")
+        
+        # Sort all results by created_at descending (newest first)
+        all_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        # Limit total results to 10
+        all_results = all_results[:10]
+        
+        logger.info(f"[FULLNAME SEARCH] Total unique results after combining all fields: {len(all_results)}")
+        if all_results:
+            for idx, result in enumerate(all_results[:5], 1):  # Log first 5 results
                 fullname = result.get('fullname', 'N/A')
-                logger.info(f"[FULLNAME SEARCH] Result {idx}: id={result.get('id')}, fullname='{fullname}' (matches: {escaped_search_value.lower() in str(fullname).lower() if fullname else False})")
+                logger.info(f"[FULLNAME SEARCH] Result {idx}: id={result.get('id')}, fullname='{fullname}'")
         else:
-            logger.warning(f"[FULLNAME SEARCH] ❌ No results found for pattern '{pattern}' (search_value: '{search_value}', escaped: '{escaped_search_value}')")
+            logger.warning(f"[FULLNAME SEARCH] ❌ No results found across all fields (search_value: '{search_value}')")
         
         # Field labels mapping (Russian)
         field_labels = {
@@ -3262,8 +3335,8 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'created_at': 'Дата'
         }
         
-        if response.data and len(response.data) > 0:
-            results = response.data
+        if all_results and len(all_results) > 0:
+            results = all_results
             photo_url = None  # Initialize for multiple results case
             
             # Check if more than 10 results
