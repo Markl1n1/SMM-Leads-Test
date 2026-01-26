@@ -1040,9 +1040,15 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
     
     # If user has add state, activate ConversationHandler AND process the callback
     if user_id in user_data_store and current_state in add_states:
+        # Add check for internal ConversationHandler keys
+        has_conversation_keys = any(
+            key.startswith('_conversation_') 
+            for key in (context.user_data.keys() if context.user_data else [])
+        )
         logger.info(
-            f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} has existing add state {current_state}, "
-            f"activating ConversationHandler and processing callback: {callback_data}"
+            f"[CHECK_ADD_STATE_ENTRY_CALLBACK] user_id={user_id}, current_state={current_state}, "
+            f"has_conversation_keys={has_conversation_keys}, user_data_store_exists={user_id in user_data_store}, "
+            f"callback={callback_data}"
         )
         
         # Process the callback immediately based on its type
@@ -1252,7 +1258,17 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             # Go directly to Review
             context.user_data['current_state'] = ADD_REVIEW
             context.user_data['current_field'] = 'review'
-            logger.info(f"[FORWARD_GLOBAL] Set ADD_REVIEW state for user {user_id}, ConversationHandler should activate via entry points")
+            # Log state transition for diagnostics
+            has_conversation_keys = any(
+                key.startswith('_conversation_') 
+                for key in (context.user_data.keys() if context.user_data else [])
+            )
+            logger.info(
+                f"[FORWARD_GLOBAL] Set ADD_REVIEW state for user {user_id}, "
+                f"has_conversation_keys={has_conversation_keys}, "
+                f"user_data_store_keys={list(user_data_store.get(user_id, {}).keys())}, "
+                f"ConversationHandler should activate via entry points"
+            )
             await show_add_review(update, context)
             return ADD_REVIEW
     
@@ -1324,8 +1340,17 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     if update.message.forward_from is None:
         # Privacy settings hide the sender info
         clear_all_conversation_state(context, user_id)
+        # Protect photo_file_id from being lost if user_data_store is recreated
+        saved_photo_file_id = None
+        if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+            saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+            logger.info(f"[FORWARD_GLOBAL] Preserving photo_file_id (privacy mode): {saved_photo_file_id}")
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
+        # Restore photo_file_id if it was saved
+        if saved_photo_file_id:
+            user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+            logger.info(f"[FORWARD_GLOBAL] Restored photo_file_id (privacy mode): {saved_photo_file_id}")
         
         # Extract data (privacy mode - limited data available)
         extracted_data = {}
@@ -1394,8 +1419,17 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         
         # Extract data from forward_from and show action choice
         clear_all_conversation_state(context, user_id)
+        # Protect photo_file_id from being lost if user_data_store is recreated
+        saved_photo_file_id = None
+        if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+            saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+            logger.info(f"[FORWARD_GLOBAL] Preserving photo_file_id: {saved_photo_file_id}")
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
+        # Restore photo_file_id if it was saved
+        if saved_photo_file_id:
+            user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+            logger.info(f"[FORWARD_GLOBAL] Restored photo_file_id: {saved_photo_file_id}")
         
         # Extract data using helper function
         extracted_data, extracted_info = extract_data_from_forwarded_message(update)
@@ -2203,7 +2237,16 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
             add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
             
             if current_state in add_states and user_id in user_data_store:
-                logger.info(f"[UNKNOWN_CALLBACK] User {user_id} has add state {current_state}, trying to activate ConversationHandler")
+                # Add check for internal ConversationHandler keys
+                has_conversation_keys = any(
+                    key.startswith('_conversation_') 
+                    for key in (context.user_data.keys() if context.user_data else [])
+                )
+                logger.info(
+                    f"[UNKNOWN_CALLBACK] User {user_id} has add state {current_state}, "
+                    f"has_conversation_keys={has_conversation_keys}, user_data_store_exists={user_id in user_data_store}, "
+                    f"trying to activate ConversationHandler for callback: {callback_data}"
+                )
                 # Обработка всех callbacks в состоянии ADD_REVIEW
                 if current_state == ADD_REVIEW and callback_data in ["add_save", "add_back", "add_cancel", "edit_fullname_from_review"]:
                     logger.info(f"[UNKNOWN_CALLBACK] Explicitly processing {callback_data} for ADD_REVIEW state via check_add_state_entry_callback")
@@ -2550,9 +2593,21 @@ async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # This prevents issues when re-entering after /q or stale states after deploy
         clear_all_conversation_state(context, user_id)
         
+        # Protect photo_file_id from being lost if user_data_store is recreated
+        # This is important if user accidentally clicks "Add" again during add flow
+        saved_photo_file_id = None
+        if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+            saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+            logger.info(f"[ADD_NEW] Preserving photo_file_id: {saved_photo_file_id}")
+        
         # Initialize fresh state for new add flow
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
+        
+        # Restore photo_file_id if it was saved (user might have accidentally clicked "Add" again)
+        if saved_photo_file_id:
+            user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+            logger.info(f"[ADD_NEW] Restored photo_file_id: {saved_photo_file_id}")
         context.user_data['current_field'] = 'fullname'
         context.user_data['current_state'] = ADD_FULLNAME  # ЯВНО устанавливаем состояние
         context.user_data['add_step'] = 0
@@ -4138,9 +4193,15 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Save value only if validation passed
     if validation_passed and normalized_value:
+        # Log state of photo_file_id before any operations
+        if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+            logger.info(f"[ADD_FIELD] photo_file_id exists before field save: {user_data_store[user_id]['photo_file_id']}")
+        
         # Ensure user_data_store entry exists (protection against race conditions)
         if user_id not in user_data_store:
+            logger.warning(f"[ADD_FIELD] Created new user_data_store[{user_id}] - this should not happen during add flow if document was saved")
             user_data_store[user_id] = {}
+            user_data_store_access_time[user_id] = time.time()
         user_data_store[user_id][field_name] = normalized_value
         logger.info(f"[ADD_FIELD] Saved {field_name} = '{normalized_value}' for user {user_id}")
         logger.info(f"[ADD_FIELD] user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
@@ -4456,9 +4517,20 @@ async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_T
                          if k in ['fullname', 'telegram_name', 'telegram_id', 'facebook_link', 'photo_file_id']}
     
     # Ensure user_data_store has the extracted data
+    # Protect photo_file_id from being lost if user_data_store is recreated
+    saved_photo_file_id = None
+    if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+        saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+        logger.info(f"[FORWARDED_ADD] Preserving photo_file_id: {saved_photo_file_id}")
+    
     if user_id not in user_data_store:
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
+    
+    # Restore photo_file_id if it was saved
+    if saved_photo_file_id and 'photo_file_id' not in user_data_store[user_id]:
+        user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+        logger.info(f"[FORWARDED_ADD] Restored photo_file_id: {saved_photo_file_id}")
     
     # Save extracted data to user_data_store if not already there
     for key, value in extracted_data.items():
@@ -4472,9 +4544,20 @@ async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['current_state'] = ADD_REVIEW
     context.user_data['current_field'] = 'review'
     
+    # Log state transition for diagnostics
+    has_conversation_keys = any(
+        key.startswith('_conversation_') 
+        for key in (context.user_data.keys() if context.user_data else [])
+    )
+    logger.info(
+        f"[FORWARDED_ADD] Set ADD_REVIEW state for user {user_id}, "
+        f"has_conversation_keys={has_conversation_keys}, "
+        f"user_data_store_keys={list(user_data_store.get(user_id, {}).keys())}, "
+        f"ConversationHandler should activate via entry points"
+    )
+    
     # Show review immediately
     await show_add_review(update, context)
-    logger.info(f"[FORWARDED_ADD] Set ADD_REVIEW state for user {user_id}, ConversationHandler should activate via entry points")
     
     return ADD_REVIEW
 
@@ -5424,7 +5507,23 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[ADD_SAVE] Before photo check - user_data_store[{user_id}] keys: {list(user_data_store.get(user_id, {}).keys())}")
             logger.info(f"[ADD_SAVE] Before photo check - user_data keys: {list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
             logger.info(f"[ADD_SAVE] Checking for photo in user_data: keys={list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
+            # Log ConversationHandler state for diagnostics
+            has_conversation_keys = any(
+                key.startswith('_conversation_') 
+                for key in (context.user_data.keys() if context.user_data else [])
+            )
+            logger.info(f"[ADD_SAVE] ConversationHandler state - has_conversation_keys={has_conversation_keys}, current_state={context.user_data.get('current_state')}")
+            
+            # Get photo_file_id from user_data, but also check user_data_store directly as fallback
+            # This ensures we don't lose photo_file_id if it was saved but not in user_data
             user_photo_file_id = user_data.get('photo_file_id')
+            if not user_photo_file_id and user_id in user_data_store:
+                # Fallback: check user_data_store directly
+                user_photo_file_id = user_data_store[user_id].get('photo_file_id')
+                if user_photo_file_id:
+                    logger.info(f"[ADD_SAVE] Found photo_file_id in user_data_store (was missing in user_data): {user_photo_file_id}")
+                    # Update user_data for consistency
+                    user_data['photo_file_id'] = user_photo_file_id
             if lead_id:
                 if user_photo_file_id:
                     logger.info(f"[PHOTO] Starting photo upload for lead {lead_id} from file_id={user_photo_file_id}")
