@@ -4416,12 +4416,18 @@ async def handle_document_during_add(update: Update, context: ContextTypes.DEFAU
         user_data_store[user_id] = {}
         user_data_store_access_time[user_id] = time.time()
     
+    # Log current state of user_data_store before saving
+    logger.info(f"[DOCUMENT_DURING_ADD] Before saving - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}")
+    
     # Extract document file_id
     document_file_id = document.file_id
     
     # Save document file_id to user_data_store (use same key as photo)
     user_data_store[user_id]['photo_file_id'] = document_file_id
     user_data_store_access_time[user_id] = time.time()
+    
+    # Log after saving to verify
+    logger.info(f"[DOCUMENT_DURING_ADD] After saving - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}, photo_file_id={document_file_id}")
     
     logger.info(f"[DOCUMENT_DURING_ADD] Saved photo_file_id={document_file_id} for user {user_id} in user_data_store")
     
@@ -5415,6 +5421,8 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.info(f"[NEW_LEAD_SAVED] Lead ID: {lead_id}")
             
             # Try to upload photo if we extracted it earlier
+            logger.info(f"[ADD_SAVE] Before photo check - user_data_store[{user_id}] keys: {list(user_data_store.get(user_id, {}).keys())}")
+            logger.info(f"[ADD_SAVE] Before photo check - user_data keys: {list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
             logger.info(f"[ADD_SAVE] Checking for photo in user_data: keys={list(user_data.keys())}, photo_file_id={user_data.get('photo_file_id')}")
             user_photo_file_id = user_data.get('photo_file_id')
             if lead_id:
