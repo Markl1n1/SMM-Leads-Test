@@ -546,7 +546,9 @@ def get_field_format_requirements(field_name: str) -> str:
             "📋 <b>Требования к формату:</b>\n"
             "• Введите имя и фамилию клиента\n"
             "• Можно использовать любые буквы (русские, латинские)\n"
-            "• Пробелы между словами разрешены\n\n"
+            "• Пробелы между словами разрешены\n"
+            "• Минимум 3 символа (для поиска)\n"
+            "• Максимум 500 символов\n\n"
             "💡 <b>Примеры:</b>\n"
             "<code>Иван Иванов</code>\n"
             "<code>John Smith</code>\n"
@@ -556,7 +558,8 @@ def get_field_format_requirements(field_name: str) -> str:
             "📋 <b>Требования к формату:</b>\n"
             "• Введите стейдж менеджера (так менеджер записан в отчётности)\n"
             "• Можно использовать любые буквы (русские, латинские)\n"
-            "• Пробелы между словами разрешены\n\n"
+            "• Пробелы между словами разрешены\n"
+            "• Максимум 500 символов\n\n"
             "💡 <b>Примеры:</b>\n"
             "<code>Анна</code>\n"
             "<code>Петр Сидоров</code>\n"
@@ -574,7 +577,9 @@ def get_field_format_requirements(field_name: str) -> str:
         ),
         'telegram_name': (
             "📋 <b>Требования к формату:</b>\n"
-            "• Пробелы не допускаются\n\n"
+            "• Пробелы не допускаются\n"
+            "• Минимум 5 символов (для надежного поиска)\n"
+            "• Разрешены: буквы, цифры, точки, подчеркивания, дефисы\n\n"
             "💡 <b>Примеры:</b>\n"
             "<code>username</code>\n"
             "<code>Ivan_123</code>\n"
@@ -582,11 +587,14 @@ def get_field_format_requirements(field_name: str) -> str:
             "⚠️ <b>Важно:</b> Не указывайте символ @ в начале"
         ),
         'telegram_id': (
-            "⚠️ Требования к формату:\n"
+            "📋 <b>Требования к формату:</b>\n"
             "• Только цифры (без букв и символов)\n"
             "• Без пробелов\n"
-            "• Минимум 1 цифра\n"
-            "Примеры: 12345, 789, 999888777"
+            "• Для поиска требуется минимум 5 цифр\n\n"
+            "💡 <b>Примеры:</b>\n"
+            "<code>123456789</code>\n"
+            "<code>987654321</code>\n"
+            "<code>12345</code>"
         )
     }
     return requirements.get(field_name, "")
@@ -1379,9 +1387,9 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         if update.message.forward_from is None:
             # Privacy settings - cannot extract checkable fields
             await update.message.reply_text(
-                "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n"
-                "Не удалось извлечь данные для проверки.\n\n"
-                "Попробуйте ввести данные вручную.",
+                "⚠️ <b>Данные отправителя недоступны</b> из-за настроек приватности.\n\n"
+                "❌ Не удалось извлечь данные для проверки.\n\n"
+                "💡 Попробуйте ввести данные вручную через меню проверки.",
                 reply_markup=get_check_back_keyboard()
             )
             return ConversationHandler.END
@@ -1472,9 +1480,9 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # Build message
         if extracted_info:
             info_text = "\n".join(extracted_info)
-            message = f"⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n✅ Извлечено из сообщения:\n\n{info_text}\n\nВыберите действие:"
+            message = f"⚠️ <b>Данные отправителя недоступны</b> из-за настроек приватности.\n\n✅ <b>Извлечено из сообщения:</b>\n\n{info_text}\n\n💡 <b>Выберите действие:</b>"
         else:
-            message = "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\nНе удалось извлечь данные из пересланного сообщения.\n\nВыберите действие:"
+            message = "⚠️ <b>Данные отправителя недоступны</b> из-за настроек приватности.\n\n❌ Не удалось извлечь данные из пересланного сообщения.\n\n💡 <b>Выберите действие:</b>"
         
         # Build keyboard
         keyboard = []
@@ -1539,9 +1547,9 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # Build message
         if extracted_info:
             info_text = "\n".join(extracted_info)
-            message = f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\nВыберите действие:"
+            message = f"✅ <b>Данные извлечены</b> из пересланного сообщения:\n\n{info_text}\n\n💡 <b>Выберите действие:</b>"
         else:
-            message = "⚠️ Не удалось извлечь данные из пересланного сообщения.\n\nВыберите действие:"
+            message = "⚠️ <b>Не удалось извлечь данные</b> из пересланного сообщения.\n\n💡 <b>Выберите действие:</b>"
         
         # Build keyboard
         keyboard = []
@@ -2167,11 +2175,13 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await retry_telegram_api(
             query.edit_message_text,
-            text="✅ Введите данные для поиска:\n\n"
-                 "Можно ввести:\n"
-                 "• Telegram username\n"
-                 "• Telegram ID\n"
-                 "• Имя клиента",
+            text="✅ <b>Введите данные для поиска:</b>\n\n"
+                 "Бот автоматически определит тип данных.\n\n"
+                 "💡 <b>Можно ввести:</b>\n"
+                 "• Facebook ссылку\n"
+                 "• Telegram username (минимум 5 символов)\n"
+                 "• Telegram ID (минимум 5 цифр)\n"
+                 "• Имя клиента (минимум 3 символа)",
             reply_markup=get_check_back_keyboard()
         )
     except Exception as e:
@@ -2404,22 +2414,22 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                     f"current_state={current_state} (not in add_states: {current_state not in add_states if current_state else 'None'}), "
                     f"user_data_store_exists={user_data_store_exists}"
                 )
-            else:
-                # No valid add state - clear and show main menu
-                logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add state for user {user_id}")
-                if user_id:
-                    clear_all_conversation_state(context, user_id)
-                try:
-                    await retry_telegram_api(query.answer, text="⚠️ Сессия истекла. Начните заново.", show_alert=True)
-                    if query.message:
-                        await retry_telegram_api(
-                            query.edit_message_text,
-                            text="⚠️ Сессия истекла.\n\nИспользуйте кнопки меню для навигации.",
-                            reply_markup=get_main_menu_keyboard()
-                        )
-                except:
-                    pass
-                return ConversationHandler.END
+        else:
+            # No valid add state - clear and show main menu
+            logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add state for user {user_id}")
+            if user_id:
+                clear_all_conversation_state(context, user_id)
+            try:
+                await retry_telegram_api(query.answer, text="⚠️ Сессия истекла. Начните заново.", show_alert=True)
+                if query.message:
+                    await retry_telegram_api(
+                        query.edit_message_text,
+                        text="⚠️ Сессия истекла.\n\nИспользуйте кнопки меню для навигации.",
+                        reply_markup=get_main_menu_keyboard()
+                    )
+            except:
+                pass
+            return ConversationHandler.END
         
         # Check if we're in a stale ConversationHandler state
         if context.user_data:
@@ -2691,7 +2701,11 @@ async def check_fullname_callback(update: Update, context: ContextTypes.DEFAULT_
     try:
         await retry_telegram_api(
             query.edit_message_text,
-            text="👤 Введите имя клиента (или фамилию):",
+            text="👤 <b>Введите имя клиента для поиска:</b>\n\n"
+                 "💡 <b>Требования:</b>\n"
+                 "• Минимум 3 символа\n"
+                 "• Можно ввести имя, фамилию или часть имени\n\n"
+                 "Бот будет искать по всем полям (имя, Telegram, Facebook).",
             reply_markup=get_check_back_keyboard()
         )
     except Exception as e:
@@ -2700,7 +2714,11 @@ async def check_fullname_callback(update: Update, context: ContextTypes.DEFAULT_
         if query.message:
             await retry_telegram_api(
                 query.message.reply_text,
-                text="👤 Введите имя клиента (или фамилию):",
+                text="👤 <b>Введите имя клиента для поиска:</b>\n\n"
+                 "💡 <b>Требования:</b>\n"
+                 "• Минимум 3 символа\n"
+                 "• Можно ввести имя, фамилию или часть имени\n\n"
+                 "Бот будет искать по всем полям (имя, Telegram, Facebook).",
                 reply_markup=get_check_back_keyboard()
             )
         else:
@@ -3067,7 +3085,13 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                 )
                 await save_check_message(update, context, sent_message.message_id)
         else:
-            message = "❌ <b>Клиент не найден</b>."
+            message = (
+                "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                "💡 <b>Попробуйте:</b>\n"
+                "• Проверить правильность введенных данных\n"
+                "• Использовать другой способ поиска\n"
+                "• Убедиться, что данные введены полностью"
+            )
             reply_markup = get_main_menu_keyboard()
             sent_message = await update.message.reply_text(
                 message,
@@ -3308,7 +3332,13 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
             logger.warning(f"[{search_type}] ❌ No results found for {db_field_name} = '{search_value}'")
-            message = "❌ <b>Клиент не найден</b>."
+            message = (
+                "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                "💡 <b>Попробуйте:</b>\n"
+                "• Проверить правильность введенных данных\n"
+                "• Использовать другой способ поиска\n"
+                "• Убедиться, что данные введены полностью"
+            )
             reply_markup = get_main_menu_keyboard()
             photo_url = None
             results = []  # Инициализируем results как пустой список, чтобы избежать ошибки в строке 2881
@@ -3382,12 +3412,22 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"[FULLNAME SEARCH] Starting search with value: '{search_value}' (length: {len(search_value)}, type: {type(search_value)})")
     
     if not search_value:
-        await update.message.reply_text("❌ Имя не может быть пустым. Попробуйте снова:")
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Имя не может быть пустым.\n\n"
+            "💡 Введите имя клиента для поиска (минимум 3 символа):",
+            parse_mode='HTML',
+            reply_markup=get_check_back_keyboard()
+        )
         return CHECK_BY_FULLNAME
     
     # Validate minimum length for fullname search
     if len(search_value) < 3:
-        await update.message.reply_text("❌ Для поиска по имени необходимо минимум 3 символа. Попробуйте снова:")
+        await update.message.reply_text(
+            "❌ <b>Ошибка:</b> Для поиска по имени необходимо минимум 3 символа.\n\n"
+            "💡 Введите имя клиента (минимум 3 символа):",
+            parse_mode='HTML',
+            reply_markup=get_check_back_keyboard()
+        )
         return CHECK_BY_FULLNAME
     
     # Normalize search value: remove extra spaces, trim
@@ -3543,7 +3583,11 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Check if more than 10 results
             if len(results) > 10:
                 await update.message.reply_text(
-                    "❌ Слишком много совпадений. Попробуйте другой фильтр поиска.",
+                    "❌ <b>Слишком много совпадений</b> (более 10 результатов).\n\n"
+                    "💡 <b>Попробуйте:</b>\n"
+                    "• Уточнить поисковый запрос\n"
+                    "• Использовать более специфичные данные (Telegram ID, Facebook ссылка)\n"
+                    "• Ввести больше символов для поиска по имени",
                     reply_markup=get_main_menu_keyboard()
                 )
                 return ConversationHandler.END
@@ -3720,7 +3764,13 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await save_check_message(update, context, sent_message.message_id)
         else:
             logger.warning(f"[FULLNAME SEARCH] ❌ No results found for pattern '{pattern}' (search_value: '{search_value}', escaped: '{escaped_search_value}')")
-            message = "❌ <b>Клиент не найден</b>."
+            message = (
+                "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                "💡 <b>Попробуйте:</b>\n"
+                "• Проверить правильность введенных данных\n"
+                "• Использовать другой способ поиска\n"
+                "• Убедиться, что данные введены полностью"
+            )
             reply_markup = get_main_menu_keyboard()
             sent_message = await update.message.reply_text(
                 message,
@@ -3819,8 +3869,14 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not search_value:
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]])
         sent_message = await update.message.reply_text(
-            "❌ Значение для поиска не может быть пустым.",
-            reply_markup=keyboard
+            "❌ <b>Ошибка:</b> Значение для поиска не может быть пустым.\n\n"
+            "💡 Введите данные для поиска:\n"
+            "• Facebook ссылку\n"
+            "• Telegram username (минимум 5 символов)\n"
+            "• Telegram ID (минимум 5 цифр)\n"
+            "• Имя клиента (минимум 3 символа)",
+            reply_markup=keyboard,
+            parse_mode='HTML'
         )
         await save_check_message(update, context, sent_message.message_id)
         return ConversationHandler.END
@@ -4036,7 +4092,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Privacy settings hide the sender info
                 await update.message.reply_text(
                     "⚠️ Данные отправителя недоступны из-за настроек приватности.\n\n"
-                    "Продолжайте заполнение полей вручную."
+                    "💡 <b>Продолжайте заполнение полей вручную.</b>"
                 )
                 # Continue with normal flow
                 if not update.message.text:
@@ -4117,13 +4173,13 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if extracted_info:
                     info_text = "\n".join(extracted_info)
                     await update.message.reply_text(
-                        f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\n"
-                        f"Продолжайте заполнение остальных полей."
+                        f"✅ <b>Данные извлечены</b> из пересланного сообщения:\n\n{info_text}\n\n"
+                        f"💡 <b>Продолжайте заполнение остальных полей.</b>"
                     )
                 else:
                     await update.message.reply_text(
-                        "⚠️ Не удалось извлечь данные из пересланного сообщения.\n\n"
-                        "Продолжайте заполнение полей вручную."
+                        "⚠️ <b>Не удалось извлечь данные</b> из пересланного сообщения.\n\n"
+                        "💡 <b>Продолжайте заполнение полей вручную.</b>"
                     )
                 
                 # Determine next field to fill - start from beginning and skip all filled fields
@@ -4157,7 +4213,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
                     
                     if next_field == 'manager_name':
-                        message = f"{progress_text}📝 Введите стейдж менеджера:\n\n ⚠️ Так менеджер записан в отчётности"
+                        message = f"{progress_text}📝 <b>Введите стейдж менеджера:</b>\n\n⚠️ <b>Важно:</b> Введите имя так, как менеджер записан в отчётности (для корректной группировки данных)"
                     elif next_field == 'fullname':
                         message = f"{progress_text}📝 Введите {field_label}:"
                     else:
@@ -4271,8 +4327,8 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if extracted_info:
                     info_text = "\n".join(extracted_info)
                     await update.message.reply_text(
-                        f"✅ Данные извлечены из пересланного сообщения:\n\n{info_text}\n\n"
-                        f"Продолжайте заполнение остальных полей."
+                        f"✅ <b>Данные извлечены</b> из пересланного сообщения:\n\n{info_text}\n\n"
+                        f"💡 <b>Продолжайте заполнение остальных полей.</b>"
                     )
                 
                 # Determine next field to fill - start from beginning and skip all filled fields
@@ -4306,7 +4362,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
                     
                     if next_field == 'manager_name':
-                        message = f"{progress_text}📝 Введите стейдж менеджера:\n\n ⚠️ Так менеджер записан в отчётности"
+                        message = f"{progress_text}📝 <b>Введите стейдж менеджера:</b>\n\n⚠️ <b>Важно:</b> Введите имя так, как менеджер записан в отчётности (для корректной группировки данных)"
                     elif next_field == 'fullname':
                         message = f"{progress_text}📝 Введите {field_label}:"
                     else:
@@ -4810,8 +4866,8 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
             # Caption couldn't be normalized, stay on current step
             logger.warning(f"[PHOTO_DURING_ADD] Could not normalize caption text: '{caption_text}' for user {user_id}")
             await update.message.reply_text(
-                "✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
-                "Продолжайте заполнение полей."
+                "✅ <b>Фото сохранено</b> и будет загружено при сохранении лида.\n\n"
+                "💡 <b>Продолжайте заполнение полей.</b>"
             )
             return ADD_FULLNAME
     else:
@@ -4848,8 +4904,8 @@ async def handle_document_during_add(update: Update, context: ContextTypes.DEFAU
     if not is_image:
         logger.info(f"[DOCUMENT_DURING_ADD] Document is not an image, ignoring (file_name={document.file_name}, mime_type={document.mime_type})")
         await update.message.reply_text(
-            "⚠️ Пожалуйста, отправьте изображение (JPG, PNG, GIF, WEBP).\n\n"
-            "Продолжайте заполнение полей."
+            "⚠️ <b>Ошибка:</b> Пожалуйста, отправьте изображение (JPG, PNG, GIF, WEBP).\n\n"
+            "💡 <b>Продолжайте заполнение полей.</b>"
         )
         return current_state
     
@@ -5184,7 +5240,13 @@ async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAUL
             keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
             reply_markup = InlineKeyboardMarkup(keyboard)
         else:
-            message = "❌ <b>Клиент не найден</b>."
+            message = (
+                "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                "💡 <b>Попробуйте:</b>\n"
+                "• Проверить правильность введенных данных\n"
+                "• Использовать другой способ поиска\n"
+                "• Убедиться, что данные введены полностью"
+            )
             reply_markup = get_main_menu_keyboard()
             photo_url = None
         
@@ -5758,11 +5820,12 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not has_identifier:
         await query.edit_message_text(
-            "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей:\n\n"
-            "• Facebook Ссылка\n"
-            "• Тег Telegram\n"
-            "• Telegram ID\n\n"
-            "ℹ️ Начнем с первого опционального поля:",
+            "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
+            "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
+            "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
+            "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
+            "ℹ️ Поле <b>Имя клиента</b> является обязательным.\n"
+            "Одно из полей идентификации также обязательно.",
             reply_markup=get_main_menu_keyboard(),
             parse_mode='HTML'
         )
@@ -5822,8 +5885,11 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 await query.edit_message_text(
-                    f"❌ <b>Ошибка:</b> {field_label} уже существует в базе.\n\n"
-                    "ℹ️ Попробуйте добавить лид заново с другими данными.",
+                    f"❌ <b>Ошибка:</b> {field_label} уже существует в базе данных.\n\n"
+                    "💡 <b>Попробуйте:</b>\n"
+                    "• Проверить существующий лид через меню \"Проверить\"\n"
+                    "• Добавить лид заново с другими данными\n"
+                    "• Убедиться, что данные введены корректно",
                     reply_markup=get_main_menu_keyboard(),
                     parse_mode='HTML'
                 )
@@ -6603,10 +6669,13 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if not has_identifier:
         await query.edit_message_text(
-            "❌ Ошибка: Необходимо указать минимум одно из полей:\n"
-            "Facebook Ссылка, Тег Telegram или Telegram ID!\n\n"
+            "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
+            "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
+            "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
+            "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
             "Выберите поле для редактирования:",
-            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {}))
+            reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {})),
+            parse_mode='HTML'
         )
         return EDIT_MENU
     
@@ -6964,14 +7033,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
             if update.message:
                 try:
                     await update.message.reply_text(
-                        "⚠️ Произошла временная ошибка. Попробуйте снова через несколько секунд."
+                        "⚠️ <b>Произошла временная ошибка.</b>\n\n"
+                        "💡 Попробуйте снова через несколько секунд.\n"
+                        "Если проблема сохраняется, обратитесь к администратору.",
+                        parse_mode='HTML'
                     )
                 except Exception:
                     pass  # Silently fail if we can't send error message
             elif update.callback_query:
                 try:
                     await update.callback_query.answer(
-                        text="⚠️ Временная ошибка. Попробуйте снова.",
+                        text="⚠️ Временная ошибка. Попробуйте снова. Если проблема сохраняется, обратитесь к администратору.",
                         show_alert=True
                     )
                 except Exception:
