@@ -2175,9 +2175,9 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         await retry_telegram_api(
             query.edit_message_text,
-            text="✅ <b>Введите данные для поиска:</b>\n\n"
+            text="✅ Введите данные для поиска:\n\n"
                  "Бот автоматически определит тип данных.\n\n"
-                 "💡 <b>Можно ввести:</b>\n"
+                 "💡 Можно ввести:\n"
                  "• Facebook ссылку\n"
                  "• Telegram username (минимум 5 символов)\n"
                  "• Telegram ID (минимум 5 цифр)\n"
@@ -3907,6 +3907,61 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Unknown type - search across multiple fields
         logger.info(f"[SMART_CHECK] Type unknown, searching across multiple fields")
         return await check_by_multiple_fields(update, context, search_value)
+
+
+async def handle_photo_during_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle photo messages during smart check flow using caption text as fullname search"""
+    if not update.message:
+        logger.error("[PHOTO_DURING_CHECK] update.message is None")
+        return ConversationHandler.END
+
+    user_id = update.effective_user.id if update.effective_user else None
+    logger.info(f"[PHOTO_DURING_CHECK] Processing photo message from user {user_id}")
+
+    # We are in SMART_CHECK_INPUT state, so we only need to process photos
+    if not update.message.photo:
+        logger.info(f"[PHOTO_DURING_CHECK] Message has no photo, skipping for user {user_id}")
+        return SMART_CHECK_INPUT
+
+    # Extract caption text
+    caption = update.message.caption or ""
+    caption = caption.strip()
+
+    # If there is no caption, ask user to add text for search
+    if not caption:
+        logger.info(f"[PHOTO_DURING_CHECK] No caption provided for photo from user {user_id}")
+        await update.message.reply_text(
+            "⚠️ Для поиска по скриншоту необходимо добавить текст к фото.\n\n"
+            "💡 Добавьте текст с именем клиента в подпись к фото и отправьте снова.",
+            reply_markup=get_check_back_keyboard()
+        )
+        return SMART_CHECK_INPUT
+
+    # Validate minimum length for fullname search
+    if len(caption) < 3:
+        logger.info(
+            f"[PHOTO_DURING_CHECK] Caption too short for search (len={len(caption)}) "
+            f"for user {user_id}"
+        )
+        await update.message.reply_text(
+            "❌ Текст слишком короткий для поиска.\n\n"
+            "💡 Для поиска по имени необходимо минимум 3 символа.\n"
+            "Попробуйте добавить более полное имя в подпись к фото.",
+            reply_markup=get_check_back_keyboard()
+        )
+        return SMART_CHECK_INPUT
+
+    # Reuse existing fullname search logic by temporarily substituting message text
+    original_text = update.message.text
+    try:
+        update.message.text = caption
+        logger.info(
+            f"[PHOTO_DURING_CHECK] Using caption as fullname search value for user {user_id}: "
+            f"'{caption[:50]}...'"
+        )
+        return await check_by_fullname(update, context)
+    finally:
+        update.message.text = original_text
 
 # Old add_field_callback removed - using sequential flow now
 
@@ -7125,6 +7180,7 @@ def create_telegram_app():
         states={
             SMART_CHECK_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, smart_check_input),
+                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_check),
                 CommandHandler("q", quit_command),
                 CommandHandler("start", start_command),
             ]
