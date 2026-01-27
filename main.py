@@ -3392,22 +3392,36 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
     
     return ConversationHandler.END
 
-async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Check by fullname using contains search with limit of 10 results"""
-    # Validate that update has a message
-    if not update.message:
-        logger.error(f"[FULLNAME SEARCH] update.message is None. Update type: {type(update)}, has callback_query: {update.callback_query is not None}")
-        logger.error(f"[FULLNAME SEARCH] Context keys: {list(context.user_data.keys()) if context.user_data else 'empty'}")
-        user_id = update.effective_user.id if update.effective_user else None
-        if user_id:
-            logger.error(f"[FULLNAME SEARCH] User ID: {user_id}")
-        return ConversationHandler.END
+async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, search_value_override: str | None = None):
+    """Check by fullname using contains search with limit of 10 results
     
-    if not update.message.text:
-        logger.error(f"[FULLNAME SEARCH] update.message.text is None")
-        return ConversationHandler.END
+    Args:
+        update: Telegram update object
+        context: Context object
+        search_value_override: Optional search value to use instead of update.message.text
+                              (useful when searching from photo caption)
+    """
+    # Determine search value source
+    if search_value_override is not None:
+        # Use provided override value (e.g., from photo caption)
+        search_value_raw = search_value_override
+    else:
+        # Original behavior for text messages
+        if not update.message:
+            logger.error(f"[FULLNAME SEARCH] update.message is None. Update type: {type(update)}, has callback_query: {update.callback_query is not None}")
+            logger.error(f"[FULLNAME SEARCH] Context keys: {list(context.user_data.keys()) if context.user_data else 'empty'}")
+            user_id = update.effective_user.id if update.effective_user else None
+            if user_id:
+                logger.error(f"[FULLNAME SEARCH] User ID: {user_id}")
+            return ConversationHandler.END
+        
+        if not update.message.text:
+            logger.error(f"[FULLNAME SEARCH] update.message.text is None")
+            return ConversationHandler.END
+        
+        search_value_raw = update.message.text
     
-    search_value = update.message.text.strip()
+    search_value = search_value_raw.strip()
     
     logger.info(f"[FULLNAME SEARCH] Starting search with value: '{search_value}' (length: {len(search_value)}, type: {type(search_value)})")
     
@@ -3951,17 +3965,12 @@ async def handle_photo_during_check(update: Update, context: ContextTypes.DEFAUL
         )
         return SMART_CHECK_INPUT
 
-    # Reuse existing fullname search logic by temporarily substituting message text
-    original_text = update.message.text
-    try:
-        update.message.text = caption
-        logger.info(
-            f"[PHOTO_DURING_CHECK] Using caption as fullname search value for user {user_id}: "
-            f"'{caption[:50]}...'"
-        )
-        return await check_by_fullname(update, context)
-    finally:
-        update.message.text = original_text
+    # Call existing fullname search logic, passing caption as override parameter
+    logger.info(
+        f"[PHOTO_DURING_CHECK] Using caption as fullname search value for user {user_id}: "
+        f"'{caption[:50]}...'"
+    )
+    return await check_by_fullname(update, context, search_value_override=caption)
 
 # Old add_field_callback removed - using sequential flow now
 
