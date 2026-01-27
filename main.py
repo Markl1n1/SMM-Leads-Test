@@ -2798,6 +2798,103 @@ async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Error in add_new_callback fallback: {fallback_error}", exc_info=True)
         return ConversationHandler.END
 
+async def add_from_check_photo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start add flow from check photo scenario - use saved photo and name"""
+    query = update.callback_query
+    try:
+        await query.answer()
+        user_id = query.from_user.id
+        
+        logger.info(f"[ADD_FROM_CHECK_PHOTO] Starting add flow from check photo for user {user_id}")
+        
+        # Extract saved photo and caption data from context
+        photo_file_id = context.user_data.get('check_photo_file_id')
+        caption = context.user_data.get('check_photo_caption')
+        
+        if not photo_file_id or not caption:
+            logger.error(f"[ADD_FROM_CHECK_PHOTO] Missing photo data for user {user_id} (photo_file_id={photo_file_id}, caption={bool(caption)})")
+            await query.edit_message_text(
+                "❌ Ошибка: данные фото не найдены.\n\n"
+                "Попробуйте снова отправить фото с именем.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        # Normalize caption as fullname
+        normalized_fullname = normalize_text_field(caption)
+        if not normalized_fullname:
+            logger.error(f"[ADD_FROM_CHECK_PHOTO] Failed to normalize caption '{caption}' for user {user_id}")
+            await query.edit_message_text(
+                "❌ Ошибка: не удалось обработать имя из подписи.\n\n"
+                "Попробуйте снова отправить фото с именем.",
+                reply_markup=get_main_menu_keyboard()
+            )
+            return ConversationHandler.END
+        
+        logger.info(f"[ADD_FROM_CHECK_PHOTO] Extracted data: photo_file_id={photo_file_id}, fullname='{normalized_fullname}'")
+        
+        # Clear all conversation state
+        clear_all_conversation_state(context, user_id)
+        
+        # Initialize user_data_store with saved photo and name
+        user_data_store[user_id] = {
+            'photo_file_id': photo_file_id,
+            'fullname': normalized_fullname
+        }
+        user_data_store_access_time[user_id] = time.time()
+        
+        # Clean up temporary check photo data from context
+        if 'check_photo_file_id' in context.user_data:
+            del context.user_data['check_photo_file_id']
+        if 'check_photo_caption' in context.user_data:
+            del context.user_data['check_photo_caption']
+        
+        # Set state to ADD_FB_LINK (skip fullname step since it's already filled)
+        context.user_data['current_field'] = 'facebook_link'
+        context.user_data['current_state'] = ADD_FB_LINK
+        context.user_data['add_step'] = 1
+        
+        # Get next field info (facebook_link)
+        field_label = get_field_label('facebook_link')
+        _, _, current_step, total_steps = get_next_add_field('fullname')
+        requirements = get_field_format_requirements('facebook_link')
+        
+        # Show message with saved name and prompt for next field
+        message = (
+            f"✅ Имя извлечено из подписи: <code>{escape_html(normalized_fullname)}</code>\n\n"
+            f"✅ Фото сохранено и будет загружено при сохранении лида.\n\n"
+            f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+            f"📝 Введите {field_label}:\n\n{requirements}"
+        )
+        
+        await retry_telegram_api(
+            query.edit_message_text,
+            text=message,
+            reply_markup=get_navigation_keyboard(is_optional=True, show_back=False),
+            parse_mode='HTML'
+        )
+        
+        # Save message ID for cleanup
+        if query.message:
+            await save_add_message(update, context, query.message.message_id)
+        
+        logger.info(f"[ADD_FROM_CHECK_PHOTO] Returning ADD_FB_LINK for user {user_id}, user_data_store keys: {list(user_data_store[user_id].keys())}")
+        
+        return ADD_FB_LINK
+        
+    except Exception as e:
+        logger.error(f"Error in add_from_check_photo_callback: {e}", exc_info=True)
+        try:
+            await query.answer("❌ Произошла ошибка. Попробуйте снова.")
+            await query.edit_message_text(
+                "❌ Произошла ошибка при запуске добавления лида.\n\n"
+                "Попробуйте снова или обратитесь к администратору.",
+                reply_markup=get_main_menu_keyboard()
+            )
+        except Exception as fallback_error:
+            logger.error(f"Error in add_from_check_photo_callback fallback: {fallback_error}", exc_info=True)
+        return ConversationHandler.END
+
 # Search by multiple fields function
 async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT_TYPE, search_value: str):
     """
@@ -3778,14 +3875,36 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 await save_check_message(update, context, sent_message.message_id)
         else:
             logger.warning(f"[FULLNAME SEARCH] ❌ No results found for pattern '{pattern}' (search_value: '{search_value}', escaped: '{escaped_search_value}')")
-            message = (
-                "❌ <b>Клиент не найден</b> в базе данных.\n\n"
-                "💡 <b>Попробуйте:</b>\n"
-                "• Проверить правильность введенных данных\n"
-                "• Использовать другой способ поиска\n"
-                "• Убедиться, что данные введены полностью"
+            
+            # Check if we have photo data from check flow (photo with caption scenario)
+            has_photo_data = (
+                'check_photo_file_id' in context.user_data and 
+                'check_photo_caption' in context.user_data
             )
-            reply_markup = get_main_menu_keyboard()
+            
+            if has_photo_data:
+                # Show message with "Add" button to continue with saved photo and name
+                message = (
+                    "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                    "💡 Хотите добавить нового клиента?\n"
+                    "Используйте уже отправленное фото и имя."
+                )
+                keyboard = [
+                    [InlineKeyboardButton("➕ Добавить клиента", callback_data="add_from_check_photo")],
+                    [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+            else:
+                # Standard "not found" message
+                message = (
+                    "❌ <b>Клиент не найден</b> в базе данных.\n\n"
+                    "💡 <b>Попробуйте:</b>\n"
+                    "• Проверить правильность введенных данных\n"
+                    "• Использовать другой способ поиска\n"
+                    "• Убедиться, что данные введены полностью"
+                )
+                reply_markup = get_main_menu_keyboard()
+            
             sent_message = await update.message.reply_text(
                 message,
                 reply_markup=reply_markup,
@@ -3964,6 +4083,14 @@ async def handle_photo_during_check(update: Update, context: ContextTypes.DEFAUL
             reply_markup=get_check_back_keyboard()
         )
         return SMART_CHECK_INPUT
+
+    # Save photo and caption data to context for potential add flow
+    if update.message.photo:
+        largest_photo = update.message.photo[-1]
+        photo_file_id = largest_photo.file_id
+        context.user_data['check_photo_file_id'] = photo_file_id
+        context.user_data['check_photo_caption'] = caption
+        logger.info(f"[PHOTO_DURING_CHECK] Saved photo_file_id and caption to context for user {user_id}")
 
     # Call existing fullname search logic, passing caption as override parameter
     logger.info(
@@ -7441,6 +7568,10 @@ def create_telegram_app():
     # otherwise `add_conv` entry_point `check_add_state_entry` can intercept PIN input.
     # `add_conv` must be registered BEFORE `photo_message_handler` so ConversationHandler
     # gets photos first when user is in add flow.
+    
+    # Register callback handler for adding from check photo scenario (BEFORE add_conv)
+    telegram_app.add_handler(CallbackQueryHandler(add_from_check_photo_callback, pattern="^add_from_check_photo$"))
+    
     telegram_app.add_handler(add_conv)
     
     # Global handler for regular photo messages (register AFTER add_conv ConversationHandler)
