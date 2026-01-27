@@ -615,21 +615,23 @@ def is_field_filled(user_data: dict, field_name: str) -> bool:
     value = user_data.get(field_name)
     return value is not None and value != '' and str(value).strip() != ''
 
-def get_next_add_field(current_field: str, skip_facebook_link: bool = False) -> tuple[str, int, int, int]:
+def get_next_add_field(current_field: str, skip_facebook_link: bool = True) -> tuple[str, int, int, int]:
     """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)
     
     Args:
         current_field: Current field name
         skip_facebook_link: If True, skip facebook_link field (for forwarded messages)
+        # Default is True - facebook_link step is temporarily disabled
     """
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        ('facebook_link', ADD_FB_LINK),
+        # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
     ]
     
     # Filter out facebook_link if skip_facebook_link is True
+    # Note: facebook_link is already commented out above, but keeping this logic for consistency
     if skip_facebook_link:
         field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
     
@@ -1658,13 +1660,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         normalized_fullname = normalize_text_field(text)
         if normalized_fullname:
             user_data_store[user_id]['fullname'] = normalized_fullname
-            context.user_data['current_field'] = 'facebook_link'
-            context.user_data['current_state'] = ADD_FB_LINK
+            # Facebook link step temporarily disabled
+            context.user_data['current_field'] = 'telegram_name'
+            context.user_data['current_state'] = ADD_TELEGRAM_NAME
             context.user_data['add_step'] = 1
             
-            field_label = get_field_label('facebook_link')
+            field_label = get_field_label('telegram_name')
             _, _, current_step, total_steps = get_next_add_field('fullname')
-            requirements = get_field_format_requirements('facebook_link')
+            requirements = get_field_format_requirements('telegram_name')
             
             await update.message.reply_text(
                 f"✅ Фото получено. Имя извлечено из текста: <code>{escape_html(normalized_fullname)}</code>\n\n"
@@ -2849,15 +2852,16 @@ async def add_from_check_photo_callback(update: Update, context: ContextTypes.DE
         if 'check_photo_caption' in context.user_data:
             del context.user_data['check_photo_caption']
         
-        # Set state to ADD_FB_LINK (skip fullname step since it's already filled)
-        context.user_data['current_field'] = 'facebook_link'
-        context.user_data['current_state'] = ADD_FB_LINK
+        # Set state to ADD_TELEGRAM_NAME (skip fullname step since it's already filled)
+        # Facebook link step is temporarily disabled
+        context.user_data['current_field'] = 'telegram_name'
+        context.user_data['current_state'] = ADD_TELEGRAM_NAME
         context.user_data['add_step'] = 1
         
-        # Get next field info (facebook_link)
-        field_label = get_field_label('facebook_link')
+        # Get next field info (telegram_name)
+        field_label = get_field_label('telegram_name')
         _, _, current_step, total_steps = get_next_add_field('fullname')
-        requirements = get_field_format_requirements('facebook_link')
+        requirements = get_field_format_requirements('telegram_name')
         
         # Show message with saved name and prompt for next field
         message = (
@@ -2878,9 +2882,9 @@ async def add_from_check_photo_callback(update: Update, context: ContextTypes.DE
         if query.message:
             await save_add_message(update, context, query.message.message_id)
         
-        logger.info(f"[ADD_FROM_CHECK_PHOTO] Returning ADD_FB_LINK for user {user_id}, user_data_store keys: {list(user_data_store[user_id].keys())}")
+        logger.info(f"[ADD_FROM_CHECK_PHOTO] Returning ADD_TELEGRAM_NAME for user {user_id}, user_data_store keys: {list(user_data_store[user_id].keys())}")
         
-        return ADD_FB_LINK
+        return ADD_TELEGRAM_NAME
         
     except Exception as e:
         logger.error(f"Error in add_from_check_photo_callback: {e}", exc_info=True)
@@ -4585,7 +4589,7 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Map ConversationHandler states to field names
     state_to_field = {
         ADD_FULLNAME: 'fullname',
-        ADD_FB_LINK: 'facebook_link',
+        # ADD_FB_LINK: 'facebook_link',  # Temporarily disabled
         ADD_TELEGRAM_NAME: 'telegram_name',
         ADD_TELEGRAM_ID: 'telegram_id',
     }
@@ -4780,13 +4784,17 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_forwarded = context.user_data.get('is_forwarded_message', False)
         
         # If Facebook link is valid, automatically skip Telegram fields and go to review
-        if field_name == 'facebook_link' and validation_passed:
-            logger.info(f"[ADD_FIELD] Facebook link is valid, auto-skipping Telegram fields (telegram_name, telegram_id)")
-            # Skip telegram_name and telegram_id, go directly to review
-            next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id', skip_facebook_link=is_forwarded)
-        else:
-            # Normal flow - move to next field
-            next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
+        # Temporarily disabled - facebook_link step is commented out
+        # if field_name == 'facebook_link' and validation_passed:
+        #     logger.info(f"[ADD_FIELD] Facebook link is valid, auto-skipping Telegram fields (telegram_name, telegram_id)")
+        #     # Skip telegram_name and telegram_id, go directly to review
+        #     next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id', skip_facebook_link=is_forwarded)
+        # else:
+        #     # Normal flow - move to next field
+        #     next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
+        
+        # Normal flow - move to next field
+        next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
     else:
         logger.warning(f"[ADD_FIELD] Not saving {field_name}: validation_passed={validation_passed}, normalized_value='{normalized_value}'")
         # Check if this is a forwarded message
@@ -5033,15 +5041,16 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
             logger.info(f"[PHOTO_DURING_ADD] Extracted fullname from caption: '{normalized_fullname}' for user {user_id}")
             logger.info(f"[PHOTO_DURING_ADD] After saving fullname - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}, photo_file_id={user_data_store[user_id].get('photo_file_id')}")
             
-            # Move to next step (ADD_FB_LINK)
-            context.user_data['current_field'] = 'facebook_link'
-            context.user_data['current_state'] = ADD_FB_LINK
+            # Move to next step (ADD_TELEGRAM_NAME)
+            # Facebook link step temporarily disabled
+            context.user_data['current_field'] = 'telegram_name'
+            context.user_data['current_state'] = ADD_TELEGRAM_NAME
             context.user_data['add_step'] = 1
             
             # Get next field info
-            field_label = get_field_label('facebook_link')
+            field_label = get_field_label('telegram_name')
             _, _, current_step, total_steps = get_next_add_field('fullname')
-            requirements = get_field_format_requirements('facebook_link')
+            requirements = get_field_format_requirements('telegram_name')
             
             # Notify user and ask for next field
             await update.message.reply_text(
@@ -5052,7 +5061,7 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
                 parse_mode='HTML'
             )
             
-            return ADD_FB_LINK
+            return ADD_TELEGRAM_NAME
         else:
             # Caption couldn't be normalized, stay on current step
             logger.warning(f"[PHOTO_DURING_ADD] Could not normalize caption text: '{caption_text}' for user {user_id}")
@@ -5790,12 +5799,13 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Определить последнее заполненное поле или последнее поле в последовательности
         field_sequence = [
             ('fullname', ADD_FULLNAME),
-            ('facebook_link', ADD_FB_LINK),
+            # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
             ('telegram_name', ADD_TELEGRAM_NAME),
             ('telegram_id', ADD_TELEGRAM_ID),
         ]
         
         # Filter out facebook_link if this is a forwarded message
+        # Note: facebook_link is already commented out above, but keeping this logic for consistency
         if is_forwarded:
             field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
         
@@ -5846,12 +5856,13 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get previous field - filter out facebook_link for forwarded messages
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        ('facebook_link', ADD_FB_LINK),
+        # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
     ]
     
     # Filter out facebook_link if this is a forwarded message
+    # Note: facebook_link is already commented out above, but keeping this logic for consistency
     if is_forwarded:
         field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
     
@@ -6006,13 +6017,13 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADD_FULLNAME
     
     # Check if at least one identifier is present
-    required_fields = ['facebook_link', 'telegram_name', 'telegram_id']
+    required_fields = ['telegram_name', 'telegram_id']  # facebook_link temporarily disabled
     has_identifier = any(user_data.get(field) for field in required_fields)
     
     if not has_identifier:
         await query.edit_message_text(
             "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
-            "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
+            # "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"  # Temporarily disabled
             "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
             "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
             "ℹ️ Поле <b>Имя клиента</b> является обязательным.\n"
