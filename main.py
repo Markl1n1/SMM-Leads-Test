@@ -1806,6 +1806,17 @@ async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PIN code input for tag command"""
     user_id = update.effective_user.id
     
+    # Safety check: if there are no tag flow markers, treat this as a stale PIN flow
+    # and do not intercept the message (so that add/edit flows can handle it)
+    if not context.user_data.get('tag_manager_name') and not context.user_data.get('tag_new_tag'):
+        logger.info(
+            f"[TAG_PIN_INPUT] Called without active tag flow markers for user {user_id}, "
+            "treating as stale PIN flow and ending conversation"
+        )
+        if 'pin_attempts' in context.user_data:
+            del context.user_data['pin_attempts']
+        return ConversationHandler.END
+    
     # ADD DETAILED LOGGING AT THE START
     logger.info(
         f"[TAG_PIN_INPUT] ⚡ Function CALLED for user {user_id}, "
@@ -2043,20 +2054,15 @@ async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         update_type = "message" if update.message else "callback_query" if update.callback_query else "unknown"
         logger.info(f"[QUIT] /q command received from user {user_id} (update_type: {update_type})")
-        logger.info(f"[QUIT] Context keys before clear: {list(context.user_data.keys()) if context.user_data else 'empty'}")
+        logger.info(f"[QUIT] Context keys before quit: {list(context.user_data.keys()) if context.user_data else 'empty'}")
         
-        # Clear all conversation state including internal ConversationHandler keys
-        clear_all_conversation_state(context, user_id)
-        
-        logger.info(f"[QUIT] Context keys after clear: {list(context.user_data.keys()) if context.user_data else 'empty'}")
-        
-        # Show main menu FIRST (fast response)
+        # Подготовить текст главного меню
         welcome_message = (
             "👋 Главное меню\n\n"
             "Выберите действие:"
         )
         
-        # Handle both message and callback_query
+        # 1) Показать главное меню (чтобы пользователь сразу увидел результат /q)
         if update.message:
             sent_message = await retry_telegram_api(
                 update.message.reply_text,
@@ -2074,7 +2080,7 @@ async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             except Exception as e:
                 # If edit fails, send new message
-                logger.warning(f"[QUIT] Could not edit message: {e}")
+                logger.warning(f"[QUIT] Could not edit message while handling /q: {e}")
                 if query.message:
                     await retry_telegram_api(
                         query.message.reply_text,
@@ -2084,11 +2090,18 @@ async def quit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             logger.error(f"[QUIT] No message or callback_query in update")
         
-        # Clean up messages AFTER showing menu (in background, don't wait)
-        # This ensures fast response to user
-        # Use application.create_task to ensure it runs in the correct event loop
-        if update.message or update.callback_query:
-            context.application.create_task(cleanup_all_messages_before_main_menu(update, context))
+        # 2) Очистить все промежуточные сообщения до главного меню.
+        # Здесь важно ДО очищения состояния, чтобы списки message_ids ещё были в context.user_data.
+        try:
+            if update.message or update.callback_query:
+                await cleanup_all_messages_before_main_menu(update, context)
+        except Exception as e:
+            logger.warning(f"[QUIT] Error while cleaning up messages on /q: {e}", exc_info=True)
+        
+        # 3) Теперь полностью очистить все состояния (context.user_data, ConversationHandler ключи и user_data_store)
+        logger.info(f"[QUIT] Clearing all conversation state for user {user_id} after /q")
+        clear_all_conversation_state(context, user_id)
+        logger.info(f"[QUIT] Context keys after quit clear: {list(context.user_data.keys()) if context.user_data else 'empty'}")
         
         return ConversationHandler.END
     except Exception as e:
@@ -2381,7 +2394,17 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                     f"trying to activate ConversationHandler for callback: {callback_data}"
                 )
                 # Обработка всех callbacks в состоянии ADD_REVIEW
-                if current_state == ADD_REVIEW and callback_data in ["add_save", "add_back", "add_cancel", "edit_fullname_from_review"]:
+                if current_state == ADD_REVIEW and callback_data in [
+                    "add_save",
+                    "add_back",
+                    "add_cancel",
+                    "edit_fullname_from_review",
+                    "add_edit_field_fullname",
+                    "add_edit_field_telegram_name",
+                    "add_edit_field_telegram_id",
+                    "add_edit_field_fb_link",
+                    "add_edit_back_to_review",
+                ]:
                     logger.info(f"[UNKNOWN_CALLBACK] Explicitly processing {callback_data} for ADD_REVIEW state via check_add_state_entry_callback")
                     # Answer callback first
                     try:
@@ -2744,6 +2767,12 @@ async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # This prevents issues when re-entering after /q or stale states after deploy
         clear_all_conversation_state(context, user_id)
         
+        # Additional safety: explicitly clear any PIN/tag/edit related flags that
+        # could cause PIN handlers to intercept add flow input
+        for key in ['pin_attempts', 'tag_manager_name', 'tag_new_tag', 'editing_lead_id']:
+            if key in context.user_data:
+                del context.user_data[key]
+        
         # Protect photo_file_id from being lost if user_data_store is recreated
         # This is important if user accidentally clicks "Add" again during add flow
         saved_photo_file_id = None
@@ -2838,6 +2867,12 @@ async def add_from_check_photo_callback(update: Update, context: ContextTypes.DE
         
         # Clear all conversation state
         clear_all_conversation_state(context, user_id)
+        
+        # Additional safety: explicitly clear any PIN/tag/edit related flags that
+        # could cause PIN handlers to intercept add flow input
+        for key in ['pin_attempts', 'tag_manager_name', 'tag_new_tag', 'editing_lead_id']:
+            if key in context.user_data:
+                del context.user_data[key]
         
         # Initialize user_data_store with saved photo and name
         user_data_store[user_id] = {
@@ -4935,9 +4970,9 @@ async def show_add_review(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💾 Сохранить", callback_data="add_save")],
     ]
     
-    # Add edit fullname button if fullname exists
-    if user_data.get('fullname'):
-        keyboard.append([InlineKeyboardButton("✏️ Редактировать", callback_data="edit_fullname_from_review")])
+    # Кнопка pre-save меню редактирования полей (доступна, если есть хотя бы одно заполненное поле)
+    if any(user_data.get(field) for field in ['fullname', 'facebook_link', 'telegram_name', 'telegram_id']):
+        keyboard.append([InlineKeyboardButton("✏️ Редактировать поля", callback_data="edit_fullname_from_review")])
     
     keyboard.extend([
         [InlineKeyboardButton("◀️ Назад", callback_data="add_back")],
@@ -5542,6 +5577,11 @@ UNIQUENESS_FIELD_LABELS = {
     'telegram_id': 'Telegram ID'
 }
 
+# Map internal field names to database column names for database queries
+FIELD_NAME_MAPPING = {
+    'telegram_name': 'telegram_user',  # Map telegram_name to telegram_user for database
+}
+
 def check_fields_uniqueness_batch(client, fields_to_check: dict) -> tuple[bool, str]:
     """
     Check uniqueness of multiple fields in a single query using OR conditions.
@@ -5549,11 +5589,6 @@ def check_fields_uniqueness_batch(client, fields_to_check: dict) -> tuple[bool, 
     """
     if not fields_to_check:
         return True, ""
-    
-    # Map internal field names to database column names
-    FIELD_NAME_MAPPING = {
-        'telegram_name': 'telegram_user',  # Map telegram_name to telegram_user for database
-    }
     
     # Check cache first
     cache_key = tuple(sorted(fields_to_check.items()))
@@ -5563,8 +5598,6 @@ def check_fields_uniqueness_batch(client, fields_to_check: dict) -> tuple[bool, 
             return cached_result
     
     # Check each field but use caching and limit queries
-    # Supabase Python client doesn't support OR conditions directly,
-    # so we check each field but optimize with caching
     try:
         for field_name, field_value in fields_to_check.items():
             if field_value and field_value.strip():
@@ -5586,6 +5619,53 @@ def check_fields_uniqueness_batch(client, fields_to_check: dict) -> tuple[bool, 
     except Exception as e:
         logger.error(f"Error checking batch uniqueness: {e}", exc_info=True)
         # On error, assume not unique to prevent duplicate inserts
+        return False, "unknown"
+
+def ensure_lead_identifiers_unique(
+    client,
+    fields_to_check: dict,
+    current_lead_id: int | None = None,
+) -> tuple[bool, str]:
+    """
+    Ensure that identifier fields (telegram/facebook) are unique.
+
+    For create flow (current_lead_id is None) this is equivalent to a simple batch uniqueness check.
+    For edit flow, records with id == current_lead_id are ignored so that a lead
+    is not considered a duplicate of itself.
+    """
+    if not fields_to_check:
+        return True, ""
+
+    # For create flow reuse existing batch logic
+    if current_lead_id is None:
+        return check_fields_uniqueness_batch(client, fields_to_check)
+
+    # Edit flow: check each field, excluding current_lead_id
+    try:
+        for field_name, field_value in fields_to_check.items():
+            if not field_value or not str(field_value).strip():
+                continue
+
+            db_field_name = FIELD_NAME_MAPPING.get(field_name, field_name)
+
+            # Query potential duplicates and exclude current lead by id
+            response = (
+                client
+                .table(TABLE_NAME)
+                .select("id")
+                .eq(db_field_name, field_value)
+                .neq("id", current_lead_id)
+                .limit(1)
+                .execute()
+            )
+            if response.data and len(response.data) > 0:
+                # Found another lead with same value
+                return False, field_name
+
+        return True, ""
+    except Exception as e:
+        logger.error(f"Error ensuring identifiers uniqueness (edit flow): {e}", exc_info=True)
+        # On error, be conservative and treat as non-unique
         return False, "unknown"
 
 def get_unique_manager_names(client) -> list[str]:
@@ -5738,50 +5818,173 @@ async def add_skip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return next_state
 
 async def edit_fullname_from_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle edit fullname button from review screen"""
+    """Open pre-save edit menu from review screen (edit fields before saving without PIN)"""
+    query = update.callback_query
+    await retry_telegram_api(query.answer)
+    
+    user_id = query.from_user.id
+    user_data = user_data_store.get(user_id)
+    
+    # Если данных нет, предложить начать заново
+    if not user_data:
+        await query.edit_message_text(
+            "❌ Ошибка: данные лида не найдены. Начните добавление заново.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    # Убедиться, что мы остаёмся в контексте обзора
+    context.user_data['current_state'] = ADD_REVIEW
+    context.user_data['current_field'] = 'review'
+    
+    # Построить меню полей для редактирования (по аналогии с меню редактирования сохранённого лида)
+    keyboard = []
+    
+    keyboard.append([InlineKeyboardButton("✏️ Имя клиента", callback_data="add_edit_field_fullname")])
+    keyboard.append([InlineKeyboardButton("✏️ Тег Telegram", callback_data="add_edit_field_telegram_name")])
+    keyboard.append([InlineKeyboardButton("✏️ Telegram ID", callback_data="add_edit_field_telegram_id")])
+    
+    # Facebook ссылка используется реже, но поддерживается
+    keyboard.append([InlineKeyboardButton("✏️ Facebook ссылка", callback_data="add_edit_field_fb_link")])
+    
+    keyboard.append([InlineKeyboardButton("⬅️ К обзору", callback_data="add_edit_back_to_review")])
+    keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="add_cancel")])
+    
+    message = (
+        "✏️ <b>Редактирование лида до сохранения</b>\n\n"
+        "Выберите поле, которое хотите изменить. После ввода нового значения вы вернётесь на экран обзора.\n\n"
+        "PIN-код не требуется, так как лид ещё не сохранён в базе."
+    )
+    
+    await retry_telegram_api(
+        query.edit_message_text,
+        text=message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
+    
+    # Сохраняем ID сообщения для последующей очистки
+    if query.message:
+        await save_add_message(update, context, query.message.message_id)
+    
+    return ADD_REVIEW
+
+
+async def add_edit_field_from_review(update: Update, context: ContextTypes.DEFAULT_TYPE, field_name: str):
+    """Generic handler to edit a specific field from pre-save review menu"""
+    query = update.callback_query
+    await retry_telegram_api(query.answer)
+    
+    user_id = query.from_user.id
+    if user_id not in user_data_store:
+        await query.edit_message_text(
+            "❌ Ошибка: данные лида не найдены. Начните добавление заново.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    user_data = user_data_store.get(user_id, {})
+    
+    # После редактирования поля нужно вернуться к обзору
+    context.user_data['return_to_review'] = True
+    
+    # Карту полей в соответствующие состояния add flow
+    field_to_state = {
+        'fullname': ADD_FULLNAME,
+        'facebook_link': ADD_FB_LINK,
+        'telegram_name': ADD_TELEGRAM_NAME,
+        'telegram_id': ADD_TELEGRAM_ID,
+    }
+    
+    target_state = field_to_state.get(field_name)
+    if not target_state:
+        logger.error(f"[ADD_EDIT_FROM_REVIEW] Unsupported field_name={field_name} for user {user_id}")
+        await query.edit_message_text(
+            "❌ Ошибка: данное поле нельзя редактировать на этом этапе.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    context.user_data['current_field'] = field_name
+    context.user_data['current_state'] = target_state
+    
+    current_value = user_data.get(field_name, '')
+    field_label = get_field_label(field_name)
+    _, _, current_step, total_steps = get_next_add_field('')
+    
+    progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+    
+    # fullname — обязательное поле, без требований к формату в сообщении
+    if field_name == 'fullname':
+        if current_value:
+            message = (
+                f"{progress_text}📝 Введите {field_label}:\n\n"
+                f"💡 Текущее значение: <code>{escape_html(str(current_value))}</code>"
+            )
+        else:
+            message = f"{progress_text}📝 Введите {field_label}:"
+        is_optional = False
+    else:
+        requirements = get_field_format_requirements(field_name)
+        if current_value:
+            message = (
+                f"{progress_text}📝 Введите {field_label}:\n\n"
+                f"💡 Текущее значение: <code>{escape_html(str(current_value))}</code>\n\n"
+                f"{requirements}"
+            )
+        else:
+            message = f"{progress_text}📝 Введите {field_label}:\n\n{requirements}"
+        is_optional = True
+    
+    await retry_telegram_api(
+        query.edit_message_text,
+        text=message,
+        reply_markup=get_navigation_keyboard(is_optional=is_optional, show_back=True),
+        parse_mode='HTML'
+    )
+    
+    if query.message:
+        await save_add_message(update, context, query.message.message_id)
+    
+    return target_state
+
+
+async def add_edit_field_fullname_from_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await add_edit_field_from_review(update, context, 'fullname')
+
+
+async def add_edit_field_telegram_name_from_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await add_edit_field_from_review(update, context, 'telegram_name')
+
+
+async def add_edit_field_telegram_id_from_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await add_edit_field_from_review(update, context, 'telegram_id')
+
+
+async def add_edit_field_fb_link_from_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    return await add_edit_field_from_review(update, context, 'facebook_link')
+
+
+async def add_edit_back_to_review_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Return from pre-save edit menu back to review screen"""
     query = update.callback_query
     await retry_telegram_api(query.answer)
     
     user_id = query.from_user.id
     
-    # Ensure user_data_store exists
     if user_id not in user_data_store:
         await query.edit_message_text(
-            "❌ Ошибка: данные не найдены. Начните добавление заново.",
+            "❌ Ошибка: данные лида не найдены. Начните добавление заново.",
             reply_markup=get_main_menu_keyboard()
         )
         return ConversationHandler.END
     
-    # Save current review state to return after editing
-    context.user_data['return_to_review'] = True
+    # Явно установить состояние обзора
+    context.user_data['current_state'] = ADD_REVIEW
+    context.user_data['current_field'] = 'review'
     
-    # Set state to ADD_FULLNAME for editing
-    context.user_data['current_field'] = 'fullname'
-    context.user_data['current_state'] = ADD_FULLNAME
-    
-    # Get current fullname value (if exists) for reference
-    current_fullname = user_data_store[user_id].get('fullname', '')
-    
-    field_label = get_field_label('fullname')
-    _, _, current_step, total_steps = get_next_add_field('')
-    
-    if current_fullname:
-        message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:\n\n💡 Текущее значение: <code>{escape_html(current_fullname)}</code>"
-    else:
-        message = f"<b>Шаг {current_step} из {total_steps}</b>\n\n📝 Введите {field_label}:"
-    
-    await retry_telegram_api(
-        query.edit_message_text,
-        text=message,
-        reply_markup=get_navigation_keyboard(is_optional=False, show_back=True),
-        parse_mode='HTML'
-    )
-    
-    # Save message ID for cleanup
-    if query.message:
-        await save_add_message(update, context, query.message.message_id)
-    
-    return ADD_FULLNAME
+    await show_add_review(update, context)
+    return ADD_REVIEW
 
 async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Go back to previous field"""
@@ -6087,8 +6290,8 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             try:
                 await query.edit_message_text(
-                    f"❌ <b>Ошибка:</b> {field_label} уже существует в базе данных.\n\n"
-                    "💡 <b>Попробуйте:</b>\n"
+                    f"❌ <b>Ошибка:</b> {field_label} уже существует в базе данных, лид не был сохранён.\n\n"
+                    "💡 <b>Что можно сделать:</b>\n"
                     "• Проверить существующий лид через меню \"Проверить\"\n"
                     "• Добавить лид заново с другими данными\n"
                     "• Убедиться, что данные введены корректно",
@@ -6099,17 +6302,15 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # If edit fails (message was deleted), send new message
                 if "not found" in str(e) or "BadRequest" in str(type(e).__name__):
                     await query.message.reply_text(
-                        f"❌ <b>Ошибка:</b> {field_label} уже существует в базе.\n\n"
+                        f"❌ <b>Ошибка:</b> {field_label} уже существует в базе, лид не был сохранён.\n\n"
                         "ℹ️ Попробуйте добавить лид заново с другими данными.",
                         reply_markup=get_main_menu_keyboard(),
                         parse_mode='HTML'
                     )
                 else:
                     raise
-            if user_id in user_data_store:
-                del user_data_store[user_id]
-            if user_id in user_data_store_access_time:
-                del user_data_store_access_time[user_id]
+            # Полностью очищаем все состояния и временные данные пользователя
+            clear_all_conversation_state(context, user_id)
             return ConversationHandler.END
     
     # All fields are unique, proceed with saving
@@ -6451,6 +6652,17 @@ async def edit_lead_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PIN code input for editing"""
     user_id = update.effective_user.id
+    
+    # Safety check: if there is no editing_lead_id in context, this is likely a
+    # stale PIN flow; do not intercept the message so that other flows can handle it
+    if not context.user_data.get('editing_lead_id'):
+        logger.info(
+            f"[EDIT_PIN_INPUT] Called without editing_lead_id for user {user_id}, "
+            "treating as stale PIN flow and ending conversation"
+        )
+        if 'pin_attempts' in context.user_data:
+            del context.user_data['pin_attempts']
+        return ConversationHandler.END
     
     # Check if message exists and has text
     if not update.message or not update.message.text:
@@ -6884,18 +7096,18 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # Merge logic: Start with current DB data, apply only changes from user_data_store
     # This ensures unchanged fields are not lost
     update_data = current_db_data.copy()
-    
+
     # Remove fields that shouldn't be updated
     for field in ['id', 'created_at']:
         update_data.pop(field, None)
-    
+
     # Apply only fields that were changed by the user
     # Compare with original data to determine what was actually changed
     original_data = context.user_data.get('original_lead_data', {})
-    
+
     # Fields that can be edited
     editable_fields = ['fullname', 'manager_name', 'facebook_link', 'telegram_name', 'telegram_id']
-    
+
     for field in editable_fields:
         if field in user_data:
             # Get current value from user_data (what user entered/changed)
@@ -6905,7 +7117,7 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             # Handle telegram_user/telegram_name mapping for original
             if field == 'telegram_name':
                 original_value = original_data.get('telegram_name') or original_data.get('telegram_user')
-            
+
             # Normalize values for comparison (handle None, empty strings, whitespace)
             def normalize_for_compare(val):
                 if val is None:
@@ -6913,14 +7125,14 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if isinstance(val, str):
                     return val.strip()
                 return str(val).strip()
-            
+
             current_normalized = normalize_for_compare(current_value)
             original_normalized = normalize_for_compare(original_value)
-            
+
             # If value changed, update it
             if current_normalized != original_normalized:
                 update_data[field] = current_value
-    
+
     # Map telegram_name to telegram_user for database (backward compatibility)
     if 'telegram_name' in update_data:
         telegram_name_value = update_data.pop('telegram_name')
@@ -6930,6 +7142,30 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # If telegram_name is empty, also clear telegram_user
         elif 'telegram_user' in update_data:
             update_data['telegram_user'] = None
+
+    # Build fields_to_check for uniqueness (only non-empty identifiers)
+    fields_to_check = {}
+    for field_name in ['facebook_link', 'telegram_name', 'telegram_id']:
+        field_value = update_data.get(field_name)
+        if field_value and str(field_value).strip():
+            fields_to_check[field_name] = field_value
+
+    # Run uniqueness check for edit flow (ignore current lead id)
+    if fields_to_check:
+        is_unique, conflicting_field = ensure_lead_identifiers_unique(client, fields_to_check, current_lead_id=lead_id)
+        if not is_unique:
+            field_label = UNIQUENESS_FIELD_LABELS.get(conflicting_field, conflicting_field)
+
+            await query.edit_message_text(
+                f"❌ <b>Ошибка:</b> {field_label} уже существует в базе данных у другого лида, изменения не были сохранены.\n\n"
+                "💡 <b>Что можно сделать:</b>\n"
+                "• Изменить значение поля и попробовать снова\n"
+                "• Вернуться к выбору поля для редактирования",
+                reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {})),
+                parse_mode='HTML'
+            )
+            # Остаёмся в edit‑флоу, возвращаемся к меню выбора поля
+            return EDIT_MENU
     
     try:
 
@@ -7462,7 +7698,13 @@ def create_telegram_app():
             ],
             ADD_REVIEW: [
                 CallbackQueryHandler(add_save_callback, pattern="^add_save$"),
+                # pre-save edit menu and field editing callbacks (без PIN)
                 CallbackQueryHandler(edit_fullname_from_review_callback, pattern="^edit_fullname_from_review$"),
+                CallbackQueryHandler(add_edit_field_fullname_from_review_callback, pattern="^add_edit_field_fullname$"),
+                CallbackQueryHandler(add_edit_field_telegram_name_from_review_callback, pattern="^add_edit_field_telegram_name$"),
+                CallbackQueryHandler(add_edit_field_telegram_id_from_review_callback, pattern="^add_edit_field_telegram_id$"),
+                CallbackQueryHandler(add_edit_field_fb_link_from_review_callback, pattern="^add_edit_field_fb_link$"),
+                CallbackQueryHandler(add_edit_back_to_review_callback, pattern="^add_edit_back_to_review$"),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
                 CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
