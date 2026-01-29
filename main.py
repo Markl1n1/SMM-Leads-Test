@@ -1365,6 +1365,31 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
             logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing edit_fullname_from_review callback for user {user_id} in state {current_state}")
             result = await edit_fullname_from_review_callback(update, context)
             return result if result is not None else current_state
+        elif callback_data == "add_edit_field_fullname":
+            # Delegate to add_edit_field_fullname_from_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_edit_field_fullname callback for user {user_id} in state {current_state}")
+            result = await add_edit_field_fullname_from_review_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_edit_field_telegram_name":
+            # Delegate to add_edit_field_telegram_name_from_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_edit_field_telegram_name callback for user {user_id} in state {current_state}")
+            result = await add_edit_field_telegram_name_from_review_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_edit_field_telegram_id":
+            # Delegate to add_edit_field_telegram_id_from_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_edit_field_telegram_id callback for user {user_id} in state {current_state}")
+            result = await add_edit_field_telegram_id_from_review_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_edit_field_fb_link":
+            # Delegate to add_edit_field_fb_link_from_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_edit_field_fb_link callback for user {user_id} in state {current_state}")
+            result = await add_edit_field_fb_link_from_review_callback(update, context)
+            return result if result is not None else current_state
+        elif callback_data == "add_edit_back_to_review":
+            # Delegate to add_edit_back_to_review_callback
+            logger.info(f"[CHECK_ADD_STATE_ENTRY_CALLBACK] Processing add_edit_back_to_review callback for user {user_id} in state {current_state}")
+            result = await add_edit_back_to_review_callback(update, context)
+            return result if result is not None else current_state
         
         # If callback doesn't match, just activate ConversationHandler
         return current_state
@@ -2692,9 +2717,93 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
                     f"current_state={current_state} (not in add_states: {current_state not in add_states if current_state else 'None'}), "
                     f"user_data_store_exists={user_data_store_exists}"
                 )
+                # No valid add state - clear and show main menu
+                if user_id:
+                    clear_all_conversation_state(context, user_id)
+                try:
+                    await retry_telegram_api(query.answer, text="⚠️ Сессия истекла. Начните заново.", show_alert=True)
+                    if query.message:
+                        await retry_telegram_api(
+                            query.edit_message_text,
+                            text="⚠️ Сессия истекла.\n\nИспользуйте кнопки меню для навигации.",
+                            reply_markup=get_main_menu_keyboard()
+                        )
+                except:
+                    pass
+                return ConversationHandler.END
+        
+        # Special handling for edit flow callbacks - try to activate ConversationHandler
+        # Includes all callbacks from edit flow states (EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME)
+        edit_flow_callbacks = [
+            "edit_field_fullname", "edit_field_telegram_name", "edit_field_telegram_id",
+            "edit_field_fb_link", "edit_field_manager", "edit_save", "edit_cancel"
+        ]
+        # Check if callback matches edit_lead_<id> pattern
+        is_edit_lead_entry = callback_data.startswith("edit_lead_") and callback_data.replace("edit_lead_", "").isdigit()
+        
+        if callback_data in edit_flow_callbacks or is_edit_lead_entry:
+            logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for edit state for user {user_id}")
+            # Check if user has edit state initialized
+            edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+            if is_facebook_flow_enabled():
+                edit_states.add(EDIT_FB_LINK)
+            
+            editing_lead_id = context.user_data.get('editing_lead_id') if context.user_data else None
+            
+            logger.info(
+                f"[UNKNOWN_CALLBACK] Checking edit state - current_state={current_state}, "
+                f"is_edit_state={current_state in edit_states if current_state else False}, "
+                f"editing_lead_id={editing_lead_id}"
+            )
+            
+            # For edit_lead_<id> entry point, always try to activate ConversationHandler
+            # For other edit callbacks, check if user is in edit flow
+            if is_edit_lead_entry or (current_state in edit_states) or editing_lead_id:
+                logger.info(
+                    f"[UNKNOWN_CALLBACK] User {user_id} has edit state or editing_lead_id, "
+                    f"current_state={current_state}, editing_lead_id={editing_lead_id}, "
+                    f"trying to activate ConversationHandler for callback: {callback_data}"
+                )
+                
+                # Clear stale ConversationHandler internal keys
+                if context.user_data:
+                    keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
+                    logger.info(f"[UNKNOWN_CALLBACK] Clearing {len(keys_to_remove)} stale ConversationHandler keys for edit flow")
+                    for key in keys_to_remove:
+                        del context.user_data[key]
+                
+                # Answer callback and let ConversationHandler process it
+                try:
+                    await retry_telegram_api(query.answer)
+                except:
+                    pass
+                
+                # Return None to let ConversationHandler process it
+                logger.info(f"[UNKNOWN_CALLBACK] Returning None to let ConversationHandler process edit callback: {callback_data}")
+                return None
+            else:
+                logger.warning(
+                    f"[UNKNOWN_CALLBACK] Cannot activate ConversationHandler for {callback_data} - "
+                    f"current_state={current_state} (not in edit_states: {current_state not in edit_states if current_state else 'None'}), "
+                    f"editing_lead_id={editing_lead_id}"
+                )
+                # No valid edit state - clear and show main menu
+                if user_id:
+                    clear_all_conversation_state(context, user_id)
+                try:
+                    await retry_telegram_api(query.answer, text="⚠️ Сессия истекла. Начните редактирование заново.", show_alert=True)
+                    if query.message:
+                        await retry_telegram_api(
+                            query.edit_message_text,
+                            text="⚠️ Сессия редактирования истекла.\n\nИспользуйте кнопки меню для навигации.",
+                            reply_markup=get_main_menu_keyboard()
+                        )
+                except:
+                    pass
+                return ConversationHandler.END
         else:
             # No valid add state - clear and show main menu
-            logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add state for user {user_id}")
+            logger.warning(f"[UNKNOWN_CALLBACK] {callback_data} callback but no valid add/edit state for user {user_id}")
             if user_id:
                 clear_all_conversation_state(context, user_id)
             try:
@@ -6164,8 +6273,9 @@ async def edit_fullname_from_review_callback(update: Update, context: ContextTyp
     keyboard.append([InlineKeyboardButton("✏️ Тег Telegram", callback_data="add_edit_field_telegram_name")])
     keyboard.append([InlineKeyboardButton("✏️ Telegram ID", callback_data="add_edit_field_telegram_id")])
     
-    # Facebook ссылка используется реже, но поддерживается
-    keyboard.append([InlineKeyboardButton("✏️ Facebook ссылка", callback_data="add_edit_field_fb_link")])
+    # Facebook ссылка - только если FACEBOOK_FLOW включен
+    if is_facebook_flow_enabled():
+        keyboard.append([InlineKeyboardButton("✏️ Facebook ссылка", callback_data="add_edit_field_fb_link")])
     
     keyboard.append([InlineKeyboardButton("⬅️ К обзору", callback_data="add_edit_back_to_review")])
     keyboard.append([InlineKeyboardButton("❌ Отменить", callback_data="add_cancel")])
@@ -6208,13 +6318,24 @@ async def add_edit_field_from_review(update: Update, context: ContextTypes.DEFAU
     # После редактирования поля нужно вернуться к обзору
     context.user_data['return_to_review'] = True
     
+    # Проверка: facebook_link можно редактировать только если FACEBOOK_FLOW включен
+    if field_name == 'facebook_link' and not is_facebook_flow_enabled():
+        logger.warning(f"[ADD_EDIT_FROM_REVIEW] Attempt to edit facebook_link when FACEBOOK_FLOW is disabled for user {user_id}")
+        await query.edit_message_text(
+            "❌ Ошибка: редактирование Facebook ссылки недоступно, так как Facebook flow отключен.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
     # Карту полей в соответствующие состояния add flow
     field_to_state = {
         'fullname': ADD_FULLNAME,
-        'facebook_link': ADD_FB_LINK,
         'telegram_name': ADD_TELEGRAM_NAME,
         'telegram_id': ADD_TELEGRAM_ID,
     }
+    # Добавляем facebook_link только если FACEBOOK_FLOW включен
+    if is_facebook_flow_enabled():
+        field_to_state['facebook_link'] = ADD_FB_LINK
     
     target_state = field_to_state.get(field_name)
     if not target_state:
