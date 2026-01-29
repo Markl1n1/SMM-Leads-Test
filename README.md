@@ -126,6 +126,10 @@ CREATE POLICY "Allow all operations for service role" ON facebook_leads
 | `SUPABASE_LEADS_BUCKET` | Имя Storage bucket (по умолчанию: `Leads`) | ❌ Нет |
 | `ENABLE_LEAD_PHOTOS` | Включить загрузку фото (`true`/`false`, по умолчанию: `true`) | ❌ Нет |
 | `FACEBOOK_FLOW` | Включить шаг Facebook ссылки в flow добавления (`ON`/`OFF`, по умолчанию: `OFF`) | ❌ Нет |
+| `RATE_LIMIT_ENABLED` | Включить rate limiting (`true`/`false`, по умолчанию: `true`) | ❌ Нет |
+| `RATE_LIMIT_REQUESTS` | Максимальное количество запросов на пользователя (по умолчанию: `30`) | ❌ Нет |
+| `RATE_LIMIT_WINDOW` | Окно времени в секундах (по умолчанию: `60`) | ❌ Нет |
+| `CLEANUP_INTERVAL_MINUTES` | Интервал автоматической очистки user_data_store в минутах (по умолчанию: `10`) | ❌ Нет |
 | `PORT` | Порт приложения (обычно устанавливается автоматически Koyeb) | ❌ Нет |
 
 **Пример значений:**

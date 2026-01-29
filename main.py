@@ -87,9 +87,117 @@ CACHE_TTL = 300  # 5 minutes in seconds
 # Graceful shutdown flag
 shutdown_requested = False
 
+# Rate limiting configuration
+RATE_LIMIT_ENABLED = os.environ.get('RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+RATE_LIMIT_REQUESTS = int(os.environ.get('RATE_LIMIT_REQUESTS', 30))  # Requests per window
+RATE_LIMIT_WINDOW = int(os.environ.get('RATE_LIMIT_WINDOW', 60))  # Window in seconds (default: 1 minute)
+
+# Rate limiting storage: {user_id: [timestamp1, timestamp2, ...]}
+rate_limit_store = {}
+
 def is_facebook_flow_enabled() -> bool:
     """Check if Facebook flow is enabled via FACEBOOK_FLOW environment variable"""
     return FACEBOOK_FLOW_ENABLED
+
+def check_rate_limit(user_id: int) -> tuple[bool, int]:
+    """Check if user has exceeded rate limit
+    
+    Args:
+        user_id: Telegram user ID
+        
+    Returns:
+        tuple: (is_allowed, remaining_or_wait)
+            - is_allowed: True if request is allowed, False if rate limited
+            - remaining_or_wait: If allowed, number of remaining requests. If not allowed, wait time in seconds
+    """
+    if not RATE_LIMIT_ENABLED:
+        return True, RATE_LIMIT_REQUESTS
+    
+    current_time = time.time()
+    window_start = current_time - RATE_LIMIT_WINDOW
+    
+    # Initialize or get user's request timestamps
+    if user_id not in rate_limit_store:
+        rate_limit_store[user_id] = []
+    
+    # Remove old timestamps outside the window
+    rate_limit_store[user_id] = [
+        ts for ts in rate_limit_store[user_id] 
+        if ts > window_start
+    ]
+    
+    # Check if limit exceeded
+    if len(rate_limit_store[user_id]) >= RATE_LIMIT_REQUESTS:
+        # Calculate when the oldest request will expire
+        oldest_request = min(rate_limit_store[user_id])
+        wait_seconds = int(RATE_LIMIT_WINDOW - (current_time - oldest_request)) + 1
+        return False, wait_seconds
+    
+    # Add current request timestamp
+    rate_limit_store[user_id].append(current_time)
+    remaining = RATE_LIMIT_REQUESTS - len(rate_limit_store[user_id])
+    
+    return True, remaining
+
+def cleanup_rate_limit_store():
+    """Clean up old entries from rate_limit_store to prevent memory leaks"""
+    if not RATE_LIMIT_ENABLED:
+        return
+    
+    current_time = time.time()
+    window_start = current_time - RATE_LIMIT_WINDOW
+    
+    users_to_clean = []
+    for user_id, timestamps in rate_limit_store.items():
+        # Remove old timestamps
+        rate_limit_store[user_id] = [ts for ts in timestamps if ts > window_start]
+        # Remove user if no active requests
+        if not rate_limit_store[user_id]:
+            users_to_clean.append(user_id)
+    
+    # Remove users with no active requests
+    for user_id in users_to_clean:
+        del rate_limit_store[user_id]
+
+def rate_limit_handler(func):
+    """Decorator to add rate limiting to handler functions"""
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not update.effective_user:
+            # If no user, allow (shouldn't happen, but be safe)
+            return await func(update, context)
+        
+        user_id = update.effective_user.id
+        is_allowed, remaining_or_wait = check_rate_limit(user_id)
+        
+        if not is_allowed:
+            # Rate limit exceeded
+            wait_seconds = remaining_or_wait
+            logger.warning(f"[RATE_LIMIT] User {user_id} exceeded rate limit. Wait {wait_seconds}s")
+            
+            # Try to send rate limit message to user
+            try:
+                if update.message:
+                    await update.message.reply_text(
+                        f"⚠️ <b>Превышен лимит запросов</b>\n\n"
+                        f"Пожалуйста, подождите {wait_seconds} секунд перед следующим запросом.\n\n"
+                        f"Это защита от злоупотреблений.",
+                        parse_mode='HTML'
+                    )
+                elif update.callback_query:
+                    await update.callback_query.answer(
+                        text=f"⚠️ Превышен лимит. Подождите {wait_seconds} секунд.",
+                        show_alert=True
+                    )
+            except Exception as e:
+                logger.error(f"[RATE_LIMIT] Failed to send rate limit message: {e}")
+            
+            return  # Don't process the update
+        
+        # Request allowed, proceed
+        return await func(update, context)
+    
+    return wrapper
 
 def retry_supabase_query(max_retries=3, delay=1, backoff=2):
     """Decorator for retrying Supabase queries with exponential backoff"""
@@ -777,6 +885,9 @@ user_data_store_access_time = {}
 USER_DATA_STORE_TTL = 3600  # 1 hour in seconds
 USER_DATA_STORE_MAX_SIZE = 1000  # Maximum number of entries
 
+# Cleanup configuration
+CLEANUP_INTERVAL_MINUTES = int(os.environ.get('CLEANUP_INTERVAL_MINUTES', 10))  # Default: 10 minutes
+
 # Main menu keyboard
 def get_main_menu_keyboard():
     """Create main menu keyboard"""
@@ -1330,6 +1441,7 @@ def extract_data_from_forwarded_message(update: Update) -> tuple[dict, list]:
     
     return extracted_data, extracted_info
 
+@rate_limit_handler
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarded messages globally - extract data and start add flow if needed"""
     if not update.message:
@@ -1663,6 +1775,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         )
         return None
 
+@rate_limit_handler
 async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular (not forwarded) photo messages - start add lead flow"""
     if not update.message:
@@ -1809,6 +1922,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     return None
 
 # Command handlers
+@rate_limit_handler
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command - show main menu"""
     try:
@@ -2288,6 +2402,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 # Callback query handlers
+@rate_limit_handler
 async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle check_menu callback - start smart check input"""
     query = update.callback_query
@@ -2345,6 +2460,7 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     return SMART_CHECK_INPUT
 
+@rate_limit_handler
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle button callbacks for menu navigation"""
     query = update.callback_query
@@ -2902,6 +3018,7 @@ async def check_fullname_callback(update: Update, context: ContextTypes.DEFAULT_
     return CHECK_BY_FULLNAME
 
 # Add callback - new sequential flow
+@rate_limit_handler
 async def add_new_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start adding new lead - sequential flow"""
     query = update.callback_query
@@ -4208,6 +4325,7 @@ async def check_fullname_input(update: Update, context: ContextTypes.DEFAULT_TYP
         return ConversationHandler.END
     return await check_by_fullname(update, context)
 
+@rate_limit_handler
 async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Smart check input handler - automatically detects type and searches accordingly"""
     if not update.message or not update.message.text:
@@ -4371,6 +4489,15 @@ def cleanup_user_data_store(exclude_user_id: int = None):
             if user_id in user_data_store_access_time:
                 del user_data_store_access_time[user_id]
     
+
+async def async_cleanup_user_data_store():
+    """Async wrapper for cleanup_user_data_store to be used in scheduler"""
+    try:
+        cleanup_user_data_store()
+        cleaned_count = len(user_data_store)
+        logger.info(f"[CLEANUP] Automatic cleanup completed. Current user_data_store size: {cleaned_count}")
+    except Exception as e:
+        logger.error(f"[CLEANUP] Error during automatic cleanup: {e}", exc_info=True)
 
 async def check_duplicate_realtime(client, field_name: str, field_value: str) -> tuple[bool, str]:
     """Check if a field value already exists in the database (for real-time validation)"""
@@ -8144,8 +8271,35 @@ def setup_keep_alive_scheduler():
             replace_existing=True
         )
         
+        # Add job for automatic user_data_store cleanup
+        scheduler.add_job(
+            async_cleanup_user_data_store,
+            trigger=IntervalTrigger(minutes=CLEANUP_INTERVAL_MINUTES),
+            id='cleanup_user_data_store',
+            name='Cleanup user_data_store',
+            replace_existing=True
+        )
+        
+        # Add job for rate limit store cleanup every 5 minutes
+        async def async_cleanup_rate_limit_store():
+            """Async wrapper for cleanup_rate_limit_store"""
+            try:
+                cleanup_rate_limit_store()
+            except Exception as e:
+                logger.error(f"[RATE_LIMIT_CLEANUP] Error: {e}", exc_info=True)
+        
+        scheduler.add_job(
+            async_cleanup_rate_limit_store,
+            trigger=IntervalTrigger(minutes=5),
+            id='cleanup_rate_limit_store',
+            name='Cleanup rate_limit_store',
+            replace_existing=True
+        )
+        
         scheduler.start()
         logger.info("Keep-alive scheduler started: bot.get_me() will be called every 5 minutes")
+        logger.info(f"Automatic cleanup scheduler started: user_data_store cleanup every {CLEANUP_INTERVAL_MINUTES} minutes")
+        logger.info("Rate limit store cleanup scheduler started: cleanup every 5 minutes")
     except Exception as e:
         logger.error(f"Failed to setup keep-alive scheduler: {e}", exc_info=True)
 
