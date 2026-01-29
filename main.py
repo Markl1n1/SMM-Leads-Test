@@ -66,6 +66,9 @@ PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 SUPABASE_LEADS_BUCKET = os.environ.get('SUPABASE_LEADS_BUCKET', 'Leads')  # Supabase Storage bucket name
 ENABLE_LEAD_PHOTOS = os.environ.get('ENABLE_LEAD_PHOTOS', 'true').lower() == 'true'  # Enable/disable photo uploads
 
+# Facebook flow configuration
+FACEBOOK_FLOW_ENABLED = os.environ.get('FACEBOOK_FLOW', 'OFF').upper() == 'ON'  # Enable/disable Facebook link step in add flow
+
 # PIN code configuration - REQUIRED environment variable (no default for security)
 PIN_CODE = os.environ.get('PIN_CODE')
 
@@ -83,6 +86,10 @@ CACHE_TTL = 300  # 5 minutes in seconds
 
 # Graceful shutdown flag
 shutdown_requested = False
+
+def is_facebook_flow_enabled() -> bool:
+    """Check if Facebook flow is enabled via FACEBOOK_FLOW environment variable"""
+    return FACEBOOK_FLOW_ENABLED
 
 def retry_supabase_query(max_retries=3, delay=1, backoff=2):
     """Decorator for retrying Supabase queries with exponential backoff"""
@@ -677,18 +684,19 @@ def get_next_add_field(current_field: str, skip_facebook_link: bool = True) -> t
     Args:
         current_field: Current field name
         skip_facebook_link: If True, skip facebook_link field (for forwarded messages)
-        # Default is True - facebook_link step is temporarily disabled
     """
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
+    ]
+    if is_facebook_flow_enabled():
+        field_sequence.append(('facebook_link', ADD_FB_LINK))
+    field_sequence.extend([
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
-    ]
+    ])
     
-    # Filter out facebook_link if skip_facebook_link is True
-    # Note: facebook_link is already commented out above, but keeping this logic for consistency
-    if skip_facebook_link:
+    # Filter out facebook_link if skip_facebook_link is True or Facebook flow is disabled
+    if skip_facebook_link or not is_facebook_flow_enabled():
         field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
     
     total_steps = len(field_sequence) + 1  # +1 for review step
@@ -1139,7 +1147,9 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
         return None
     
     # Edit flow states
-    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    if is_facebook_flow_enabled():
+        edit_states.add(EDIT_FB_LINK)
     if current_state in edit_states:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in edit flow (state={current_state}), "
@@ -1148,7 +1158,9 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
         return None
     
     # Conversation states that belong to the add flow
-    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if is_facebook_flow_enabled():
+        add_states.add(ADD_FB_LINK)
     
     # If user has add data and current_state points to add flow – handle this update there
     if user_id in user_data_store and current_state in add_states:
@@ -1192,7 +1204,9 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
         return None
     
     # Conversation states that belong to the add flow
-    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if is_facebook_flow_enabled():
+        add_states.add(ADD_FB_LINK)
     
     # If user has add state, activate ConversationHandler AND process the callback
     if user_id in user_data_store and current_state in add_states:
@@ -1362,11 +1376,15 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     current_state = context.user_data.get('current_state')
     
     # Edit flow states
-    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    if is_facebook_flow_enabled():
+        edit_states.add(EDIT_FB_LINK)
     # Tag flow states
     tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
     # Add flow states
-    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if is_facebook_flow_enabled():
+        add_states.add(ADD_FB_LINK)
     
     # Check if user is in edit flow
     if current_state in edit_states or context.user_data.get('editing_lead_id'):
@@ -1668,9 +1686,13 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
     
     # Check if user is in another active ConversationHandler
     current_state = context.user_data.get('current_state')
-    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_FB_LINK, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    edit_states = {EDIT_PIN, EDIT_MENU, EDIT_FULLNAME, EDIT_TELEGRAM_NAME, EDIT_TELEGRAM_ID, EDIT_MANAGER_NAME}
+    if is_facebook_flow_enabled():
+        edit_states.add(EDIT_FB_LINK)
     tag_states = {TAG_SELECT_MANAGER, TAG_ENTER_NEW}
-    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if is_facebook_flow_enabled():
+        add_states.add(ADD_FB_LINK)
     
     # Check if user is in edit flow
     if current_state in edit_states or context.user_data.get('editing_lead_id'):
@@ -1734,7 +1756,7 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         normalized_fullname = normalize_text_field(text)
         if normalized_fullname:
             user_data_store[user_id]['fullname'] = normalized_fullname
-            # Facebook link step temporarily disabled
+            # Facebook link step - controlled by FACEBOOK_FLOW env var
             context.user_data['current_field'] = 'telegram_name'
             context.user_data['current_state'] = ADD_TELEGRAM_NAME
             context.user_data['add_step'] = 1
@@ -2484,7 +2506,9 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         if callback_data in ["add_skip", "add_back", "add_cancel", "add_save", "add_save_force"]:
             logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for add state for user {user_id}")
             # Check if user has add state initialized
-            add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+            add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+            if is_facebook_flow_enabled():
+                add_states.add(ADD_FB_LINK)
             
             logger.info(
                 f"[UNKNOWN_CALLBACK] Checking add state - current_state={current_state}, "
@@ -3005,7 +3029,7 @@ async def add_from_check_photo_callback(update: Update, context: ContextTypes.DE
             del context.user_data['check_photo_caption']
         
         # Set state to ADD_TELEGRAM_NAME (skip fullname step since it's already filled)
-        # Facebook link step is temporarily disabled
+        # Facebook link step - controlled by FACEBOOK_FLOW env var
         context.user_data['current_field'] = 'telegram_name'
         context.user_data['current_state'] = ADD_TELEGRAM_NAME
         context.user_data['add_step'] = 1
@@ -4187,7 +4211,9 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_state = context.user_data.get('current_state')
     
     # Check if user is in ADD flow - if yes, don't process as check
-    add_states = {ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
+    if is_facebook_flow_enabled():
+        add_states.add(ADD_FB_LINK)
     if user_id in user_data_store and current_state in add_states:
         logger.info(f"[SMART_CHECK] User {user_id} is in ADD flow (state={current_state}), not processing as check")
         return None  # Return None to let ADD flow handler process it
@@ -4780,10 +4806,13 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Map ConversationHandler states to field names
     state_to_field = {
         ADD_FULLNAME: 'fullname',
-        # ADD_FB_LINK: 'facebook_link',  # Temporarily disabled
+    }
+    if is_facebook_flow_enabled():
+        state_to_field[ADD_FB_LINK] = 'facebook_link'
+    state_to_field.update({
         ADD_TELEGRAM_NAME: 'telegram_name',
         ADD_TELEGRAM_ID: 'telegram_id',
-    }
+    })
     
     # Get field_name from state first (more reliable)
     field_name = state_to_field.get(current_state)
@@ -4975,17 +5004,13 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_forwarded = context.user_data.get('is_forwarded_message', False)
         
         # If Facebook link is valid, automatically skip Telegram fields and go to review
-        # Temporarily disabled - facebook_link step is commented out
-        # if field_name == 'facebook_link' and validation_passed:
-        #     logger.info(f"[ADD_FIELD] Facebook link is valid, auto-skipping Telegram fields (telegram_name, telegram_id)")
-        #     # Skip telegram_name and telegram_id, go directly to review
-        #     next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id', skip_facebook_link=is_forwarded)
-        # else:
-        #     # Normal flow - move to next field
-        #     next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
-        
-        # Normal flow - move to next field
-        next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
+        if is_facebook_flow_enabled() and field_name == 'facebook_link' and validation_passed:
+            logger.info(f"[ADD_FIELD] Facebook link is valid, auto-skipping Telegram fields (telegram_name, telegram_id)")
+            # Skip telegram_name and telegram_id, go directly to review
+            next_field, next_state, current_step, total_steps = get_next_add_field('telegram_id', skip_facebook_link=is_forwarded)
+        else:
+            # Normal flow - move to next field
+            next_field, next_state, current_step, total_steps = get_next_add_field(field_name, skip_facebook_link=is_forwarded)
     else:
         logger.warning(f"[ADD_FIELD] Not saving {field_name}: validation_passed={validation_passed}, normalized_value='{normalized_value}'")
         # Check if this is a forwarded message
@@ -5235,7 +5260,7 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
             logger.info(f"[PHOTO_DURING_ADD] After saving fullname - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}, photo_file_id={user_data_store[user_id].get('photo_file_id')}")
             
             # Move to next step (ADD_TELEGRAM_NAME)
-            # Facebook link step temporarily disabled
+            # Facebook link step - controlled by FACEBOOK_FLOW env var
             context.user_data['current_field'] = 'telegram_name'
             context.user_data['current_state'] = ADD_TELEGRAM_NAME
             context.user_data['add_step'] = 1
@@ -6163,13 +6188,16 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Определить последнее заполненное поле или последнее поле в последовательности
         field_sequence = [
             ('fullname', ADD_FULLNAME),
-            # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
+        ]
+        if is_facebook_flow_enabled():
+            field_sequence.append(('facebook_link', ADD_FB_LINK))
+        field_sequence.extend([
             ('telegram_name', ADD_TELEGRAM_NAME),
             ('telegram_id', ADD_TELEGRAM_ID),
-        ]
+        ])
         
         # Filter out facebook_link if this is a forwarded message
-        # Note: facebook_link is already commented out above, but keeping this logic for consistency
+        # Facebook link step - controlled by FACEBOOK_FLOW env var
         if is_forwarded:
             field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
         
@@ -6220,13 +6248,16 @@ async def add_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get previous field - filter out facebook_link for forwarded messages
     field_sequence = [
         ('fullname', ADD_FULLNAME),
-        # ('facebook_link', ADD_FB_LINK),  # Temporarily disabled
+    ]
+    if is_facebook_flow_enabled():
+        field_sequence.append(('facebook_link', ADD_FB_LINK))
+    field_sequence.extend([
         ('telegram_name', ADD_TELEGRAM_NAME),
         ('telegram_id', ADD_TELEGRAM_ID),
-    ]
+    ])
     
     # Filter out facebook_link if this is a forwarded message
-    # Note: facebook_link is already commented out above, but keeping this logic for consistency
+    # Facebook link step - controlled by FACEBOOK_FLOW env var
     if is_forwarded:
         field_sequence = [f for f in field_sequence if f[0] != 'facebook_link']
     
@@ -6381,17 +6412,21 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADD_FULLNAME
     
     # Check if at least one identifier is present
-    required_fields = ['telegram_name', 'telegram_id']  # facebook_link temporarily disabled
+    required_fields = ['telegram_name', 'telegram_id']
+    if is_facebook_flow_enabled():
+        required_fields.append('facebook_link')
     has_identifier = any(user_data.get(field) for field in required_fields)
     
     if not has_identifier:
+        error_msg = "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
+        if is_facebook_flow_enabled():
+            error_msg += "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
+        error_msg += "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
+        error_msg += "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
+        error_msg += "ℹ️ Поле <b>Имя клиента</b> является обязательным.\n"
+        error_msg += "Одно из полей идентификации также обязательно."
         await query.edit_message_text(
-            "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
-            # "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"  # Temporarily disabled
-            "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
-            "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
-            "ℹ️ Поле <b>Имя клиента</b> является обязательным.\n"
-            "Одно из полей идентификации также обязательно.",
+            error_msg,
             reply_markup=get_main_menu_keyboard(),
             parse_mode='HTML'
         )
@@ -7277,17 +7312,21 @@ async def edit_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return EDIT_MENU
     
     # Check if at least one identifier is present
-    required_fields = ['facebook_link', 'telegram_name', 'telegram_id']
+    required_fields = ['telegram_name', 'telegram_id']
+    if is_facebook_flow_enabled():
+        required_fields.insert(0, 'facebook_link')
     # Also check telegram_user for backward compatibility
     has_identifier = any(user_data.get(field) for field in required_fields) or user_data.get('telegram_user')
     
     if not has_identifier:
+        error_msg = "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
+        if is_facebook_flow_enabled():
+            error_msg += "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
+        error_msg += "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
+        error_msg += "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
+        error_msg += "Выберите поле для редактирования:"
         await query.edit_message_text(
-            "❌ <b>Ошибка:</b> Необходимо указать минимум одно из полей для идентификации клиента:\n\n"
-            "• <b>Facebook Ссылка</b> - ссылка на профиль Facebook\n"
-            "• <b>Тег Telegram</b> - username клиента (минимум 5 символов)\n"
-            "• <b>Telegram ID</b> - числовой идентификатор (минимум 5 цифр)\n\n"
-            "Выберите поле для редактирования:",
+            error_msg,
             reply_markup=get_edit_field_keyboard(user_id, context.user_data.get('original_lead_data', {})),
             parse_mode='HTML'
         )
@@ -7846,37 +7885,30 @@ def create_telegram_app():
     # )
     
     # Conversation handler for adding - sequential flow
-    add_conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
-            CallbackQueryHandler(forwarded_add_callback, pattern="^forwarded_add$"),
-            # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
-            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
-            # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
-            # This handles callbacks like add_skip, add_back, add_save when flow was started via forwarded message
-            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel|add_save|add_save_force)$")
+    add_conv_states = {
+        ADD_FULLNAME: [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+            MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+            MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
+            CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
+            CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
+            CommandHandler("q", quit_command),
+            CommandHandler("start", start_command),
         ],
-        states={
-            ADD_FULLNAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_FB_LINK: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
-                MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
-                MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
-                CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
-                CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
-                CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
-                CommandHandler("q", quit_command),
-                CommandHandler("start", start_command),
-            ],
-            ADD_TELEGRAM_NAME: [
+    }
+    if is_facebook_flow_enabled():
+        add_conv_states[ADD_FB_LINK] = [
+            MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
+            MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
+            MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
+            CallbackQueryHandler(add_skip_callback, pattern="^add_skip$"),
+            CallbackQueryHandler(add_back_callback, pattern="^add_back$"),
+            CallbackQueryHandler(add_cancel_callback, pattern="^add_cancel$"),
+            CommandHandler("q", quit_command),
+            CommandHandler("start", start_command),
+        ]
+    add_conv_states.update({
+        ADD_TELEGRAM_NAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, add_field_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_add),
                 MessageHandler(filters.Document.ALL & ~filters.FORWARDED, handle_document_during_add),
@@ -7913,7 +7945,19 @@ def create_telegram_app():
                 CommandHandler("q", quit_command),
                 CommandHandler("start", start_command),
             ],
-        },
+    })
+    
+    add_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
+            CallbackQueryHandler(forwarded_add_callback, pattern="^forwarded_add$"),
+            # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
+            MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
+            # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
+            # This handles callbacks like add_skip, add_back, add_save when flow was started via forwarded message
+            CallbackQueryHandler(check_add_state_entry_callback, pattern="^(add_skip|add_back|add_cancel|add_save|add_save_force)$")
+        ],
+        states=add_conv_states,
         fallbacks=[CommandHandler("q", quit_command), CommandHandler("start", start_command)],
         per_message=False,
     )

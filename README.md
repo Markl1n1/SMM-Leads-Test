@@ -125,6 +125,7 @@ CREATE POLICY "Allow all operations for service role" ON facebook_leads
 | `TABLE_NAME` | Имя таблицы в Supabase (по умолчанию: `facebook_leads`) | ❌ Нет |
 | `SUPABASE_LEADS_BUCKET` | Имя Storage bucket (по умолчанию: `Leads`) | ❌ Нет |
 | `ENABLE_LEAD_PHOTOS` | Включить загрузку фото (`true`/`false`, по умолчанию: `true`) | ❌ Нет |
+| `FACEBOOK_FLOW` | Включить шаг Facebook ссылки в flow добавления (`ON`/`OFF`, по умолчанию: `OFF`) | ❌ Нет |
 | `PORT` | Порт приложения (обычно устанавливается автоматически Koyeb) | ❌ Нет |
 
 **Пример значений:**
