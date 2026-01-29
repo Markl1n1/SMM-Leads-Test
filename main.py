@@ -1756,14 +1756,14 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         normalized_fullname = normalize_text_field(text)
         if normalized_fullname:
             user_data_store[user_id]['fullname'] = normalized_fullname
-            # Facebook link step - controlled by FACEBOOK_FLOW env var
-            context.user_data['current_field'] = 'telegram_name'
-            context.user_data['current_state'] = ADD_TELEGRAM_NAME
-            context.user_data['add_step'] = 1
+            # Use get_next_add_field to determine next field (respects FACEBOOK_FLOW)
+            next_field, next_state, current_step, total_steps = get_next_add_field('fullname', skip_facebook_link=False)
+            context.user_data['current_field'] = next_field
+            context.user_data['current_state'] = next_state
+            context.user_data['add_step'] = current_step - 1
             
-            field_label = get_field_label('telegram_name')
-            _, _, current_step, total_steps = get_next_add_field('fullname')
-            requirements = get_field_format_requirements('telegram_name')
+            field_label = get_field_label(next_field)
+            requirements = get_field_format_requirements(next_field)
             
             await update.message.reply_text(
                 f"✅ Фото получено. Имя извлечено из текста: <code>{escape_html(normalized_fullname)}</code>\n\n"
@@ -2502,8 +2502,15 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
             # Return None to let ConversationHandler process it
             return None
         
-        # Special handling for add_skip, add_back, add_cancel, add_save, add_save_force - try to activate ConversationHandler
-        if callback_data in ["add_skip", "add_back", "add_cancel", "add_save", "add_save_force"]:
+        # Special handling for add flow callbacks - try to activate ConversationHandler
+        # Includes all callbacks from add flow states (ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW)
+        add_flow_callbacks = [
+            "add_skip", "add_back", "add_cancel", "add_save", "add_save_force",
+            "edit_fullname_from_review", "add_edit_field_fullname", 
+            "add_edit_field_telegram_name", "add_edit_field_telegram_id", 
+            "add_edit_field_fb_link", "add_edit_back_to_review"
+        ]
+        if callback_data in add_flow_callbacks:
             logger.info(f"[UNKNOWN_CALLBACK] {callback_data} callback not handled by ConversationHandler, checking for add state for user {user_id}")
             # Check if user has add state initialized
             add_states = {ADD_FULLNAME, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW}
@@ -3028,16 +3035,16 @@ async def add_from_check_photo_callback(update: Update, context: ContextTypes.DE
         if 'check_photo_caption' in context.user_data:
             del context.user_data['check_photo_caption']
         
-        # Set state to ADD_TELEGRAM_NAME (skip fullname step since it's already filled)
-        # Facebook link step - controlled by FACEBOOK_FLOW env var
-        context.user_data['current_field'] = 'telegram_name'
-        context.user_data['current_state'] = ADD_TELEGRAM_NAME
-        context.user_data['add_step'] = 1
+        # Use get_next_add_field to determine next field after fullname (respects FACEBOOK_FLOW)
+        # skip_facebook_link=False because this is not a forwarded message
+        next_field, next_state, current_step, total_steps = get_next_add_field('fullname', skip_facebook_link=False)
+        context.user_data['current_field'] = next_field
+        context.user_data['current_state'] = next_state
+        context.user_data['add_step'] = current_step - 1
         
-        # Get next field info (telegram_name)
-        field_label = get_field_label('telegram_name')
-        _, _, current_step, total_steps = get_next_add_field('fullname')
-        requirements = get_field_format_requirements('telegram_name')
+        # Get next field info
+        field_label = get_field_label(next_field)
+        requirements = get_field_format_requirements(next_field)
         
         # Show message with saved name and prompt for next field
         message = (
@@ -5259,16 +5266,16 @@ async def handle_photo_during_add(update: Update, context: ContextTypes.DEFAULT_
             logger.info(f"[PHOTO_DURING_ADD] Extracted fullname from caption: '{normalized_fullname}' for user {user_id}")
             logger.info(f"[PHOTO_DURING_ADD] After saving fullname - user_data_store[{user_id}] keys: {list(user_data_store[user_id].keys())}, photo_file_id={user_data_store[user_id].get('photo_file_id')}")
             
-            # Move to next step (ADD_TELEGRAM_NAME)
-            # Facebook link step - controlled by FACEBOOK_FLOW env var
-            context.user_data['current_field'] = 'telegram_name'
-            context.user_data['current_state'] = ADD_TELEGRAM_NAME
-            context.user_data['add_step'] = 1
+            # Use get_next_add_field to determine next field after fullname (respects FACEBOOK_FLOW)
+            # skip_facebook_link=False because this is not a forwarded message
+            next_field, next_state, current_step, total_steps = get_next_add_field('fullname', skip_facebook_link=False)
+            context.user_data['current_field'] = next_field
+            context.user_data['current_state'] = next_state
+            context.user_data['add_step'] = current_step - 1
             
             # Get next field info
-            field_label = get_field_label('telegram_name')
-            _, _, current_step, total_steps = get_next_add_field('fullname')
-            requirements = get_field_format_requirements('telegram_name')
+            field_label = get_field_label(next_field)
+            requirements = get_field_format_requirements(next_field)
             
             # Notify user and ask for next field
             await update.message.reply_text(
