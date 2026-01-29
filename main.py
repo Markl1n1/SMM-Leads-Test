@@ -66,6 +66,9 @@ PORT = int(os.environ.get('PORT', 8000))  # Default port, usually set by Koyeb
 SUPABASE_LEADS_BUCKET = os.environ.get('SUPABASE_LEADS_BUCKET', 'Leads')  # Supabase Storage bucket name
 ENABLE_LEAD_PHOTOS = os.environ.get('ENABLE_LEAD_PHOTOS', 'true').lower() == 'true'  # Enable/disable photo uploads
 
+# PIN code configuration - REQUIRED environment variable (no default for security)
+PIN_CODE = os.environ.get('PIN_CODE')
+
 # Supabase client - thread-safe, can be used concurrently by multiple users
 supabase: Client = None
 # Separate client for Storage operations (uses service_role key to bypass RLS)
@@ -812,8 +815,8 @@ async def download_photo_from_supabase(photo_url: str) -> bytes | None:
     """Download photo from Supabase Storage using storage client and return as bytes"""
     try:
         # Extract storage path from URL
-        # URL format: https://{project}.supabase.co/storage/v1/object/public/{bucket}/{path}
-        # Example: https://mwovubdpxkeqpyxsadgg.supabase.co/storage/v1/object/public/Leads/photos/lead_2051_f475f8b3.jpg
+        # URL format: https://{project-id}.supabase.co/storage/v1/object/public/{bucket}/{path}
+        # Example: https://your-project-id.supabase.co/storage/v1/object/public/Leads/photos/lead_2051_f475f8b3.jpg
         if not photo_url or not photo_url.strip():
             logger.error("[PHOTO] Empty photo_url provided")
             return None
@@ -1033,7 +1036,9 @@ def clear_all_conversation_state(context: ContextTypes.DEFAULT_TYPE, user_id: in
         keys_to_remove = [
             'current_field', 'current_state', 'add_step', 'editing_lead_id',
             'last_check_messages', 'add_message_ids', 'check_by', 'check_value',
-            'check_results', 'selected_lead_id', 'original_lead_data'
+            'check_results', 'selected_lead_id', 'original_lead_data',
+            # PIN-related keys
+            'pin_attempts', 'tag_manager_name', 'tag_new_tag'
         ]
         for key in keys_to_remove:
             if key in context.user_data:
@@ -1103,12 +1108,13 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     # Check for tag flow indicators (even if current_state is not set correctly)
     tag_manager_name = context.user_data.get('tag_manager_name')
     tag_new_tag = context.user_data.get('tag_new_tag')
-    pin_attempts = context.user_data.get('pin_attempts')
+    # Check if pin_attempts key exists (not just if it's not None, as 0 is valid)
+    has_pin_attempts = 'pin_attempts' in context.user_data
     # If user has pin_attempts, they're likely in tag flow (PIN input stage)
-    if tag_manager_name or tag_new_tag or pin_attempts is not None:
+    if tag_manager_name or tag_new_tag or has_pin_attempts:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow "
-            f"(tag_manager_name={bool(tag_manager_name)}, tag_new_tag={bool(tag_new_tag)}, pin_attempts={pin_attempts}), "
+            f"(tag_manager_name={bool(tag_manager_name)}, tag_new_tag={bool(tag_new_tag)}, has_pin_attempts={has_pin_attempts}), "
             "not intercepting message"
         )
         return None
@@ -1874,6 +1880,18 @@ async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PIN code input for tag command"""
     user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    # CRITICAL: If user is in check flow, don't intercept the message
+    if current_state == SMART_CHECK_INPUT:
+        logger.info(
+            f"[TAG_PIN_INPUT] User {user_id} is in check flow (SMART_CHECK_INPUT), "
+            "clearing stale tag state and ending conversation"
+        )
+        # Clear stale tag state
+        for key in ['pin_attempts', 'tag_manager_name', 'tag_new_tag']:
+            context.user_data.pop(key, None)
+        return ConversationHandler.END
     
     # Safety check: if there are no tag flow markers AND we're not in TAG_PIN state with pin_attempts,
     # treat this as a stale PIN flow and do not intercept the message (so that add/edit flows can handle it)
@@ -1920,9 +1938,7 @@ async def tag_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = update.message.text.strip()
     
-    # PIN code is "2025"
-    PIN_CODE = "2025"
-    
+    # PIN code from environment variable
     if text == PIN_CODE:
         # PIN is correct, reset attempt counter
         if 'pin_attempts' in context.user_data:
@@ -2265,6 +2281,10 @@ async def check_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
         for key in keys_to_remove:
             del context.user_data[key]
+    
+    # Explicitly clear PIN-related keys to prevent conflicts
+    for key in ['pin_attempts', 'tag_manager_name', 'tag_new_tag', 'editing_lead_id']:
+        context.user_data.pop(key, None)
     
     # Clean up old check messages
     await cleanup_check_messages(update, context)
@@ -3268,7 +3288,10 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                         leads_without_photos.append(result)
                 
                 # Send separate messages for leads with photos
-                for idx, result in enumerate(leads_with_photos, 1):
+                # Calculate correct index based on position in all_results
+                for result in leads_with_photos:
+                    # Find index in all_results (1-based)
+                    correct_idx = all_results.index(result) + 1
                     lead_id = result.get('id')
                     keyboard = []
                     if lead_id is not None:
@@ -3276,17 +3299,20 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     
-                    await send_lead_with_photo(update, result, idx, len(all_results), reply_markup)
+                    await send_lead_with_photo(update, result, correct_idx, len(all_results), reply_markup)
                 
                 # Build message for leads without photos
                 if leads_without_photos:
                     message_parts = [f"✅ <b>Найдено клиентов: {len(all_results)}</b>\n"]
                     
-                    # Show all leads in the list (for reference)
-                    for idx, result in enumerate(all_results, 1):
-                        if idx > 1:
+                    # Show only leads without photos in the list (to avoid duplication)
+                    # Calculate correct index based on position in all_results
+                    for result in leads_without_photos:
+                        # Find index in all_results (1-based)
+                        correct_idx = all_results.index(result) + 1
+                        if len(message_parts) > 1:  # If not first lead in message
                             message_parts.append("")
-                        message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
+                        message_parts.append(f"<b>━━━ Клиент {correct_idx} ━━━</b>")
                         for field_name_key, field_label in field_labels.items():
                             value = result.get(field_name_key)
                             
@@ -3653,7 +3679,7 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
     return ConversationHandler.END
 
 async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, search_value_override: str | None = None):
-    """Check by fullname using contains search with limit of 10 results
+    """Check by fullname using contains search with limit of 30 results
     
     Args:
         update: Telegram update object
@@ -3761,7 +3787,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         pattern = f"%{normalized_fullname}%"
         logger.info(f"[FULLNAME SEARCH] Using pattern: '{pattern}' for field 'fullname'")
         try:
-            response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).order("created_at", desc=True).limit(10).execute()
+            response = client.table(TABLE_NAME).select("*").ilike("fullname", pattern).order("created_at", desc=True).limit(30).execute()
             if response.data:
                 for item in response.data:
                     if item.get('id') not in seen_ids:
@@ -3815,7 +3841,7 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             try:
                 pattern = f"%{normalized_fullname}%"
                 logger.info(f"[FULLNAME SEARCH] Using pattern: '{pattern}' for field 'manager_name'")
-                response = client.table(TABLE_NAME).select("*").ilike("manager_name", pattern).order("created_at", desc=True).limit(10).execute()
+                response = client.table(TABLE_NAME).select("*").ilike("manager_name", pattern).order("created_at", desc=True).limit(30).execute()
                 if response.data:
                     for item in response.data:
                         if item.get('id') not in seen_ids:
@@ -3828,8 +3854,8 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Sort all results by created_at descending (newest first)
         all_results.sort(key=lambda x: x.get('created_at', ''), reverse=True)
         
-        # Limit total results to 10
-        all_results = all_results[:10]
+        # Limit total results to 30
+        all_results = all_results[:30]
         
         logger.info(f"[FULLNAME SEARCH] Total unique results after combining all fields: {len(all_results)}")
         if all_results:
@@ -3960,7 +3986,10 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                         leads_without_photos.append(result)
                 
                 # Send separate messages for leads with photos
-                for idx, result in enumerate(leads_with_photos, 1):
+                # Calculate correct index based on position in results
+                for result in leads_with_photos:
+                    # Find index in results (1-based)
+                    correct_idx = results.index(result) + 1
                     lead_id = result.get('id')
                     keyboard = []
                     if lead_id is not None:
@@ -3968,17 +3997,20 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
                     reply_markup = InlineKeyboardMarkup(keyboard)
                     
-                    await send_lead_with_photo(update, result, idx, len(results), reply_markup)
+                    await send_lead_with_photo(update, result, correct_idx, len(results), reply_markup)
                 
                 # Build message for leads without photos
                 if leads_without_photos:
                     message_parts = [f"✅ <b>Найдено клиентов: {len(results)}</b>\n"]
                     
-                    # Show all leads in the list (for reference)
-                    for idx, result in enumerate(results, 1):
-                        if idx > 1:
+                    # Show only leads without photos in the list (to avoid duplication)
+                    # Calculate correct index based on position in results
+                    for result in leads_without_photos:
+                        # Find index in results (1-based)
+                        correct_idx = results.index(result) + 1
+                        if len(message_parts) > 1:  # If not first lead in message
                             message_parts.append("")
-                        message_parts.append(f"<b>━━━ Клиент {idx} ━━━</b>")
+                        message_parts.append(f"<b>━━━ Клиент {correct_idx} ━━━</b>")
                         for field_name_key, field_label in field_labels.items():
                             value = result.get(field_name_key)
                             
@@ -6802,6 +6834,18 @@ async def edit_lead_callback(update: Update, context: ContextTypes.DEFAULT_TYPE,
 async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle PIN code input for editing"""
     user_id = update.effective_user.id
+    current_state = context.user_data.get('current_state')
+    
+    # CRITICAL: If user is in check flow, don't intercept the message
+    if current_state == SMART_CHECK_INPUT:
+        logger.info(
+            f"[EDIT_PIN_INPUT] User {user_id} is in check flow (SMART_CHECK_INPUT), "
+            "clearing stale edit state and ending conversation"
+        )
+        # Clear stale edit state
+        context.user_data.pop('editing_lead_id', None)
+        context.user_data.pop('pin_attempts', None)
+        return ConversationHandler.END
     
     # Safety check: if there is no editing_lead_id in context, this is likely a
     # stale PIN flow; do not intercept the message so that other flows can handle it
@@ -6834,9 +6878,7 @@ async def edit_pin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
     
-    # PIN code is "2025"
-    PIN_CODE = "2025"
-    
+    # PIN code from environment variable
     if text == PIN_CODE:
         # PIN is correct, reset attempt counter
         if 'pin_attempts' in context.user_data:
@@ -8078,6 +8120,9 @@ if __name__ == '__main__':
     
     if not SUPABASE_KEY:
         missing_vars.append("SUPABASE_KEY")
+    
+    if not PIN_CODE:
+        missing_vars.append("PIN_CODE")
     
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
