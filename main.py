@@ -678,7 +678,7 @@ def is_field_filled(user_data: dict, field_name: str) -> bool:
     value = user_data.get(field_name)
     return value is not None and value != '' and str(value).strip() != ''
 
-def get_next_add_field(current_field: str, skip_facebook_link: bool = True) -> tuple[str, int, int, int]:
+def get_next_add_field(current_field: str, skip_facebook_link: bool = False) -> tuple[str, int, int, int]:
     """Get next field in the add flow. Returns (field_name, state, current_step, total_steps)
     
     Args:
