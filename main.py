@@ -7208,6 +7208,9 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # The photo_url will be set later after successful upload
         if 'photo_file_id' in save_data:
             save_data.pop('photo_file_id')
+        # Remove had_photo - internal flag, not a DB column
+        if 'had_photo' in save_data:
+            save_data.pop('had_photo')
         
         # Map telegram_name to telegram_user for database (backward compatibility)
         if 'telegram_name' in save_data:
