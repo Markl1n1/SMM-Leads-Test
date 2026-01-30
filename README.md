@@ -126,6 +126,7 @@ CREATE POLICY "Allow all operations for service role" ON facebook_leads
 | `SUPABASE_LEADS_BUCKET` | Имя Storage bucket (по умолчанию: `Leads`) | ❌ Нет |
 | `ENABLE_LEAD_PHOTOS` | Включить загрузку фото (`true`/`false`, по умолчанию: `true`) | ❌ Нет |
 | `FACEBOOK_FLOW` | Включить шаг Facebook ссылки в flow добавления (`ON`/`OFF`, по умолчанию: `OFF`) | ❌ Нет |
+| `MINIMAL_ADD_MODE` | Режим минимального добавления (`ON`/`OFF`, по умолчанию: `OFF`) | ❌ Нет |
 | `RATE_LIMIT_ENABLED` | Включить rate limiting (`true`/`false`, по умолчанию: `true`) | ❌ Нет |
 | `RATE_LIMIT_REQUESTS` | Максимальное количество запросов на пользователя (по умолчанию: `30`) | ❌ Нет |
 | `RATE_LIMIT_WINDOW` | Окно времени в секундах (по умолчанию: `60`) | ❌ Нет |
