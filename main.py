@@ -1506,6 +1506,59 @@ def extract_data_from_forwarded_message(update: Update) -> tuple[dict, list]:
     
     return extracted_data, extracted_info
 
+def extract_data_from_photo_message(update: Update) -> tuple[dict, list]:
+    """
+    Extract data from regular photo message (not forwarded).
+    Returns (extracted_data dict, extracted_info list for display)
+    """
+    extracted_data = {}
+    extracted_info = []
+    
+    # Extract fullname from text or caption
+    if update.message.text:
+        text = update.message.text.strip()
+        normalized_fullname = normalize_text_field(text)
+        if normalized_fullname:
+            extracted_data['fullname'] = normalized_fullname
+            extracted_info.append(f"• Имя: {normalized_fullname}")
+            logger.info(f"[EXTRACT_PHOTO_DATA] Extracted fullname from text: {normalized_fullname}")
+    
+    if update.message.caption and 'fullname' not in extracted_data:
+        caption = update.message.caption.strip()
+        normalized_fullname = normalize_text_field(caption)
+        if normalized_fullname:
+            extracted_data['fullname'] = normalized_fullname
+            extracted_info.append(f"• Имя: {normalized_fullname}")
+            logger.info(f"[EXTRACT_PHOTO_DATA] Extracted fullname from caption: {normalized_fullname}")
+    
+    # Extract Facebook link from text/caption
+    if update.message.text:
+        text = update.message.text.strip()
+        is_valid_fb, _, fb_normalized = validate_facebook_link(text)
+        if is_valid_fb:
+            extracted_data['facebook_link'] = fb_normalized
+            extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+            logger.info(f"[EXTRACT_PHOTO_DATA] Extracted facebook_link from text: {fb_normalized}")
+    
+    if update.message.caption and 'facebook_link' not in extracted_data:
+        caption = update.message.caption.strip()
+        is_valid_fb, _, fb_normalized = validate_facebook_link(caption)
+        if is_valid_fb:
+            extracted_data['facebook_link'] = fb_normalized
+            extracted_info.append(f"• Facebook ссылка: {format_facebook_link_for_display(fb_normalized)}")
+            logger.info(f"[EXTRACT_PHOTO_DATA] Extracted facebook_link from caption: {fb_normalized}")
+    
+    # Extract photo
+    if update.message.photo:
+        largest_photo = update.message.photo[-1]
+        photo_file_id = largest_photo.file_id
+        extracted_data['photo_file_id'] = photo_file_id
+        extracted_data['had_photo'] = True  # Mark that photo was extracted
+        extracted_info.append("• Фото: обнаружено (будет загружено при сохранении)")
+        logger.info(f"[EXTRACT_PHOTO_DATA] Extracted photo_file_id: {photo_file_id}, marked had_photo=True")
+    
+    return extracted_data, extracted_info
+
 @rate_limit_handler
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle forwarded messages globally - extract data and start add flow if needed"""
@@ -1902,15 +1955,22 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return None
     
+    # Check if user is in check flow (SMART_CHECK_INPUT)
+    if current_state == SMART_CHECK_INPUT:
+        logger.info(
+            f"[PHOTO_MESSAGE] User {user_id} is in check flow (SMART_CHECK_INPUT), "
+            f"letting ConversationHandler handle photo"
+        )
+        return None  # Let ConversationHandler handle it (handle_photo_during_check)
+    
+    # User is in main menu - show action selection
+    # Extract photo and data, show selection menu
+    logger.info(f"[PHOTO_MESSAGE] User {user_id} is in main menu, showing action selection")
+    
     # Extract photo
     largest_photo = update.message.photo[-1]
     photo_file_id = largest_photo.file_id
     logger.info(f"[PHOTO_MESSAGE] Extracted photo_file_id: {photo_file_id} for user {user_id}")
-    
-    # Check if message has text or caption
-    has_text = bool(update.message.text and update.message.text.strip())
-    has_caption = bool(update.message.caption and update.message.caption.strip())
-    logger.info(f"[PHOTO_MESSAGE] Scenario: {'with text' if (has_text or has_caption) else 'without text'} for user {user_id}")
     
     # Protect photo_file_id from being lost if user_data_store is recreated
     saved_photo_file_id = None
@@ -1918,72 +1978,59 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         saved_photo_file_id = user_data_store[user_id]['photo_file_id']
         logger.info(f"[PHOTO_MESSAGE] Preserving existing photo_file_id: {saved_photo_file_id}")
     
-    # Initialize add flow
-    clear_all_conversation_state(context, user_id)
-    user_data_store[user_id] = {}
-    user_data_store_access_time[user_id] = time.time()
-    user_data_store[user_id]['photo_file_id'] = photo_file_id  # Новое фото
+    # Initialize user_data_store for photo
+    if user_id not in user_data_store:
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+    
+    user_data_store[user_id]['photo_file_id'] = photo_file_id
+    user_data_store[user_id]['had_photo'] = True
     
     # Log if old photo_file_id was replaced
     if saved_photo_file_id:
         logger.info(f"[PHOTO_MESSAGE] Old photo_file_id was replaced: {saved_photo_file_id} -> {photo_file_id}")
     
-    if has_text or has_caption:
-        # Сценарий 2: Фото с текстом - использовать текст как fullname, начать с шага 2
-        text = (update.message.text or update.message.caption).strip()
-        normalized_fullname = normalize_text_field(text)
-        if normalized_fullname:
-            user_data_store[user_id]['fullname'] = normalized_fullname
-            # Use get_next_add_field to determine next field (respects FACEBOOK_FLOW)
-            next_field, next_state, current_step, total_steps = get_next_add_field('fullname', skip_facebook_link=False)
-            context.user_data['current_field'] = next_field
-            context.user_data['current_state'] = next_state
-            context.user_data['add_step'] = current_step - 1
-            
-            field_label = get_field_label(next_field)
-            requirements = get_field_format_requirements(next_field)
-            
-            await update.message.reply_text(
-                f"✅ Фото получено. Имя извлечено из текста: <code>{escape_html(normalized_fullname)}</code>\n\n"
-                f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
-                f"📝 Введите {field_label}:\n\n{requirements}",
-                reply_markup=get_navigation_keyboard(is_optional=True, show_back=False),
-                parse_mode='HTML'
-            )
-        else:
-            # Если текст не удалось нормализовать, начать с шага 1
-            context.user_data['current_field'] = 'fullname'
-            context.user_data['current_state'] = ADD_FULLNAME
-            context.user_data['add_step'] = 0
-            
-            field_label = get_field_label('fullname')
-            _, _, current_step, total_steps = get_next_add_field('')
-            
-            await update.message.reply_text(
-                f"✅ Фото получено.\n\n"
-                f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
-                f"📝 Введите {field_label}:",
-                reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
-                parse_mode='HTML'
-            )
-    else:
-        # Сценарий 1: Фото без текста - начать с шага 1
-        context.user_data['current_field'] = 'fullname'
-        context.user_data['current_state'] = ADD_FULLNAME
-        context.user_data['add_step'] = 0
-        
-        field_label = get_field_label('fullname')
-        _, _, current_step, total_steps = get_next_add_field('')
-        
-        await update.message.reply_text(
-            f"✅ Фото получено.\n\n"
-            f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
-            f"📝 Введите {field_label}:",
-            reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
-            parse_mode='HTML'
-        )
+    # Extract data using helper function
+    extracted_data, extracted_info = extract_data_from_photo_message(update)
     
-    logger.info(f"[PHOTO_MESSAGE] Started add flow for user {user_id} with photo (scenario: {'with text' if (has_text or has_caption) else 'without text'})")
+    # Save extracted data to user_data_store
+    for key, value in extracted_data.items():
+        user_data_store[user_id][key] = value
+    
+    # Update access time
+    user_data_store_access_time[user_id] = time.time()
+    
+    # Save extracted data in context for callback handlers
+    context.user_data['photo_extracted_data'] = extracted_data
+    
+    logger.info(f"[PHOTO_MESSAGE] Saved extracted data to user_data_store for user {user_id}: {list(extracted_data.keys())}")
+    
+    # Check if we have any fields for checking (fullname, telegram_name, telegram_id)
+    has_checkable_fields = any(field in extracted_data for field in ['fullname', 'telegram_name', 'telegram_id'])
+    
+    # Build message
+    if extracted_info:
+        info_text = "\n".join(extracted_info)
+        message = f"✅ <b>Данные извлечены</b> из фото:\n\n{info_text}\n\n💡 <b>Выберите действие:</b>"
+    else:
+        message = "✅ <b>Фото получено</b>.\n\n💡 <b>Выберите действие:</b>"
+    
+    # Build keyboard
+    keyboard = []
+    if has_checkable_fields:
+        keyboard.append([
+            InlineKeyboardButton("➕ Добавить", callback_data="photo_add"),
+            InlineKeyboardButton("✅ Проверить", callback_data="photo_check")
+        ])
+    else:
+        keyboard.append([InlineKeyboardButton("➕ Добавить", callback_data="photo_add")])
+    keyboard.append([InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")])
+    
+    await update.message.reply_text(
+        message,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='HTML'
+    )
     return None
 
 # Command handlers
@@ -5917,6 +5964,102 @@ async def forwarded_check_callback(update: Update, context: ContextTypes.DEFAULT
     
     return ConversationHandler.END
 
+async def photo_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Add' button for photo message - go directly to Review"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    logger.info(f"[PHOTO_ADD] User {user_id} chose to add photo message")
+    
+    # Get extracted data from context or user_data_store
+    extracted_data = context.user_data.get('photo_extracted_data', {})
+    if not extracted_data and user_id in user_data_store:
+        # Fallback: get from user_data_store
+        extracted_data = {k: v for k, v in user_data_store[user_id].items() 
+                         if k in ['fullname', 'telegram_name', 'telegram_id', 'facebook_link', 'photo_file_id']}
+    
+    # Ensure user_data_store has the extracted data
+    # Protect photo_file_id from being lost if user_data_store is recreated
+    saved_photo_file_id = None
+    if user_id in user_data_store and 'photo_file_id' in user_data_store[user_id]:
+        saved_photo_file_id = user_data_store[user_id]['photo_file_id']
+        logger.info(f"[PHOTO_ADD] Preserving photo_file_id: {saved_photo_file_id}")
+    
+    if user_id not in user_data_store:
+        user_data_store[user_id] = {}
+        user_data_store_access_time[user_id] = time.time()
+    
+    # Restore photo_file_id if it was saved
+    if saved_photo_file_id and 'photo_file_id' not in user_data_store[user_id]:
+        user_data_store[user_id]['photo_file_id'] = saved_photo_file_id
+        logger.info(f"[PHOTO_ADD] Restored photo_file_id: {saved_photo_file_id}")
+    
+    # Save extracted data to user_data_store if not already there
+    for key, value in extracted_data.items():
+        if key not in user_data_store[user_id] or not user_data_store[user_id][key]:
+            user_data_store[user_id][key] = value
+    
+    # Set state to ADD_REVIEW
+    context.user_data['current_state'] = ADD_REVIEW
+    context.user_data['current_field'] = 'review'
+    
+    # Log state transition for diagnostics
+    has_conversation_keys = any(
+        key.startswith('_conversation_') 
+        for key in (context.user_data.keys() if context.user_data else [])
+    )
+    conversation_keys_list = [k for k in (context.user_data.keys() if context.user_data else []) if k.startswith('_conversation_')]
+    logger.info(
+        f"[PHOTO_ADD] Set ADD_REVIEW state for user {user_id}, "
+        f"has_conversation_keys={has_conversation_keys}, conversation_keys={conversation_keys_list}, "
+        f"user_data_store_keys={list(user_data_store.get(user_id, {}).keys())}, "
+        f"ConversationHandler should activate via entry points"
+    )
+    
+    # Show review immediately
+    await show_add_review(update, context)
+    
+    return ADD_REVIEW
+
+async def photo_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle 'Check' button for photo message - check by extracted fields"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    logger.info(f"[PHOTO_CHECK] User {user_id} chose to check photo message")
+    
+    # Get extracted data from context or user_data_store
+    extracted_data = context.user_data.get('photo_extracted_data', {})
+    if not extracted_data and user_id in user_data_store:
+        # Fallback: get from user_data_store
+        extracted_data = {k: v for k, v in user_data_store[user_id].items() 
+                         if k in ['fullname', 'telegram_name', 'telegram_id']}
+    
+    # Extract checkable fields
+    checkable_fields = {}
+    if 'fullname' in extracted_data and extracted_data['fullname']:
+        checkable_fields['fullname'] = extracted_data['fullname']
+    if 'telegram_name' in extracted_data and extracted_data['telegram_name']:
+        checkable_fields['telegram_name'] = extracted_data['telegram_name']
+    if 'telegram_id' in extracted_data and extracted_data['telegram_id']:
+        checkable_fields['telegram_id'] = extracted_data['telegram_id']
+    
+    if not checkable_fields:
+        # No fields to check
+        await query.edit_message_text(
+            "❌ Не удалось извлечь данные для проверки из фото.\n\n"
+            "Попробуйте добавить лид вручную.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return ConversationHandler.END
+    
+    # Use check_by_extracted_fields function
+    await check_by_extracted_fields(update, context, checkable_fields)
+    
+    return ConversationHandler.END
+
 async def check_by_extracted_fields(update: Update, context: ContextTypes.DEFAULT_TYPE, extracted_data: dict):
     """
     Check leads by extracted fields from forwarded message.
@@ -8429,6 +8572,7 @@ def create_telegram_app():
         entry_points=[
             CallbackQueryHandler(add_new_callback, pattern="^add_new$"),
             CallbackQueryHandler(forwarded_add_callback, pattern="^forwarded_add$"),
+            CallbackQueryHandler(photo_add_callback, pattern="^photo_add$"),
             # Allow MessageHandler to enter if user has add state initialized (from forwarded message)
             MessageHandler(filters.TEXT & ~filters.COMMAND, check_add_state_entry),
             # Allow CallbackQueryHandler to enter if user has add state initialized (from forwarded message)
@@ -8562,6 +8706,10 @@ def create_telegram_app():
     # Add callback query handler for forwarded message check action (register BEFORE button_callback)
     # Note: forwarded_add_callback is registered in add_conv entry_points, so no need to register separately
     telegram_app.add_handler(CallbackQueryHandler(forwarded_check_callback, pattern="^forwarded_check$"))
+    
+    # Add callback query handler for photo message check action (register BEFORE button_callback)
+    # Note: photo_add_callback is registered in add_conv entry_points, so no need to register separately
+    telegram_app.add_handler(CallbackQueryHandler(photo_check_callback, pattern="^photo_check$"))
     
     # Add callback query handler for menu navigation buttons
     # Registered AFTER ConversationHandlers so they have priority
