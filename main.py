@@ -5900,6 +5900,25 @@ async def forwarded_add_callback(update: Update, context: ContextTypes.DEFAULT_T
     for key, value in extracted_data.items():
         if key not in user_data_store[user_id] or not user_data_store[user_id][key]:
             user_data_store[user_id][key] = value
+
+    # If fullname is missing, ask for it instead of going to review
+    if not user_data_store[user_id].get('fullname'):
+        _, _, current_step, total_steps = get_next_add_field('')
+        progress_text = f"<b>Шаг {current_step} из {total_steps}</b>\n\n"
+        field_label = get_field_label('fullname')
+
+        context.user_data['current_state'] = ADD_FULLNAME
+        context.user_data['current_field'] = 'fullname'
+        context.user_data['add_step'] = 0
+
+        await query.edit_message_text(
+            f"{progress_text}📝 Введите {field_label}:",
+            reply_markup=get_navigation_keyboard(is_optional=False, show_back=False),
+            parse_mode='HTML'
+        )
+        if query.message:
+            await save_add_message(update, context, query.message.message_id)
+        return ADD_FULLNAME
     
     # Mark as forwarded message
     context.user_data['is_forwarded_message'] = True
