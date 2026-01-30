@@ -3356,11 +3356,15 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         is_valid_fb, _, fb_normalized = validate_facebook_link(search_value)
         if is_valid_fb:
             normalized_facebook_link = fb_normalized
+            # Also try to search in telegram_user with original value (in case URL was saved there)
+            # This handles cases where Facebook URLs were incorrectly saved to telegram_user column
+            normalized_tg_user = search_value  # Use original value for telegram_user search
         
-        # Try Telegram username normalization
-        is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
-        if is_valid_tg_user:
-            normalized_tg_user = tg_user_normalized
+        # Try Telegram username normalization (only if not already identified as Facebook URL)
+        if not is_valid_fb:
+            is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
+            if is_valid_tg_user:
+                normalized_tg_user = tg_user_normalized
         
         # Try Telegram ID normalization (only if not already identified as Facebook ID)
         # Telegram ID = 10 digits, Facebook ID = 14+ digits
@@ -3735,37 +3739,115 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
     
     # Normalize Telegram Name if checking by telegram_user
     elif field_name == "telegram_user":
-        # Use same normalization as when adding (remove @, spaces)
-        is_valid, error_msg, normalized = validate_telegram_name(search_value)
-        if not is_valid:
-            logger.warning(f"[{search_type}] ❌ Validation failed: {error_msg}")
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]])
-            sent_message = await update.message.reply_text(
-                f"❌ {error_msg}",
-                reply_markup=keyboard
-            )
-            await save_check_message(update, context, sent_message.message_id)
-            return ConversationHandler.END
-        search_value = normalized
-        logger.info(f"[{search_type}] Normalized Telegram username: '{normalized}'")
+        # First check if the input is a Facebook URL
+        # This handles cases where Facebook URLs were incorrectly saved to telegram_user column
+        is_fb_url, _, fb_normalized = validate_facebook_link(search_value)
+        response_data = None  # Initialize for later use
+        
+        if is_fb_url:
+            # Search in both telegram_user (as-is, in case URL was saved there) 
+            # and facebook_link (normalized, in case it was saved correctly)
+            client = get_supabase_client()
+            if not client:
+                error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+                await update.message.reply_text(
+                    error_msg,
+                    reply_markup=get_main_menu_keyboard(),
+                    parse_mode='HTML'
+                )
+                return ConversationHandler.END
+            
+            all_results = []
+            seen_ids = set()
+            
+            # Search in telegram_user with original value (in case URL was saved there)
+            logger.info(f"[{search_type}] Searching telegram_user with original value: '{search_value}'")
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("telegram_user", search_value).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[{search_type}] Found {len(response.data)} results in telegram_user with original value")
+            except Exception as e:
+                logger.warning(f"[{search_type}] Error searching telegram_user with original value: {e}")
+            
+            # Also search in facebook_link with normalized value
+            logger.info(f"[{search_type}] Searching facebook_link with normalized value: '{fb_normalized}'")
+            try:
+                response = client.table(TABLE_NAME).select("*").eq("facebook_link", fb_normalized).limit(50).execute()
+                if response.data:
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+                    logger.info(f"[{search_type}] Found {len(response.data)} results in facebook_link with normalized value")
+            except Exception as e:
+                logger.warning(f"[{search_type}] Error searching facebook_link with normalized value: {e}")
+            
+            # Use all_results instead of response.data
+            response_data = all_results
+            logger.info(f"[{search_type}] Total unique results: {len(response_data)}")
+        else:
+            # Normal Telegram username - use existing logic
+            is_valid, error_msg, normalized = validate_telegram_name(search_value)
+            if not is_valid:
+                logger.warning(f"[{search_type}] ❌ Validation failed: {error_msg}")
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]])
+                sent_message = await update.message.reply_text(
+                    f"❌ {error_msg}",
+                    reply_markup=keyboard
+                )
+                await save_check_message(update, context, sent_message.message_id)
+                return ConversationHandler.END
+            search_value = normalized
+            logger.info(f"[{search_type}] Normalized Telegram username: '{normalized}'")
+            
+            # Get Supabase client
+            client = get_supabase_client()
+            if not client:
+                error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+                await update.message.reply_text(
+                    error_msg,
+                    reply_markup=get_main_menu_keyboard(),
+                    parse_mode='HTML'
+                )
+                return ConversationHandler.END
+            
+            # For normal Telegram username: exact match, limit to 50 results
+            logger.info(f"[{search_type}] Executing query: SELECT * FROM {TABLE_NAME} WHERE {db_field_name} = '{search_value}' LIMIT 50")
+            response = client.table(TABLE_NAME).select("*").eq(db_field_name, search_value).limit(50).execute()
+            logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
+            logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
+            response_data = response.data if response.data else []
+        else:
+            # For telegram_user with normal username, response_data is already set above
+            pass
     
-    # Get Supabase client (for all fields, not just phone)
-    client = get_supabase_client()
-    if not client:
-        error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
-        await update.message.reply_text(
-            error_msg,
-            reply_markup=get_main_menu_keyboard(),
-            parse_mode='HTML'
-        )
-        return ConversationHandler.END
+    # Get Supabase client (for all other fields, not telegram_user)
+    if field_name != "telegram_user":
+        client = get_supabase_client()
+        if not client:
+            error_msg = get_user_friendly_error(Exception("Database connection failed"), "подключении к базе данных")
+            await update.message.reply_text(
+                error_msg,
+                reply_markup=get_main_menu_keyboard(),
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
     
     try:
-        # For all fields: exact match, limit to 50 results
-        logger.info(f"[{search_type}] Executing query: SELECT * FROM {TABLE_NAME} WHERE {db_field_name} = '{search_value}' LIMIT 50")
-        response = client.table(TABLE_NAME).select("*").eq(db_field_name, search_value).limit(50).execute()
-        logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
-        logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
+        # For all other fields: exact match, limit to 50 results
+        if field_name != "telegram_user":
+            logger.info(f"[{search_type}] Executing query: SELECT * FROM {TABLE_NAME} WHERE {db_field_name} = '{search_value}' LIMIT 50")
+            response = client.table(TABLE_NAME).select("*").eq(db_field_name, search_value).limit(50).execute()
+            logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
+            logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
+            response_data = response.data if response.data else []
+        elif field_name == "telegram_user" and not is_fb_url:
+            # This case is already handled above in the else branch
+            pass
         
         # Field labels mapping (Russian) - use database column names
         field_labels = {
@@ -3779,8 +3861,8 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             'created_at': 'Дата'
         }
         
-        if response.data and len(response.data) > 0:
-            results = response.data
+        if response_data and len(response_data) > 0:
+            results = response_data
             photo_url = None  # Initialize for multiple results case
             
             # If multiple results, show all
@@ -4048,6 +4130,11 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         if is_valid_fb:
             normalized_fb_link = fb_normalized
             logger.info(f"[FULLNAME SEARCH] Value can also be normalized as facebook_link: '{normalized_fb_link}'")
+            # Also try to search in telegram_user with original value (in case URL was saved there)
+            # This handles cases where Facebook URLs were incorrectly saved to telegram_user column
+            if not normalized_tg_user:  # Only set if not already set
+                normalized_tg_user = search_value
+                logger.info(f"[FULLNAME SEARCH] Will also search in telegram_user with original value: '{search_value}'")
         
         # Search across all fields where normalization succeeded
         # Supabase Python client doesn't support .or() directly, so we use multiple queries and combine results
