@@ -109,6 +109,7 @@ from bot.flows.forwarded_flow import (
 from bot.flows.edit_flow import (
     edit_lead_entry_callback,
     edit_pin_input,
+    edit_field_input,
     edit_field_fullname_callback,
     edit_field_fb_link_callback,
     edit_field_telegram_name_callback,
