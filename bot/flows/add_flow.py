@@ -3,7 +3,7 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from bot.config import is_facebook_flow_enabled, is_minimal_add_mode_enabled
+from bot.config import TABLE_NAME, is_facebook_flow_enabled, is_minimal_add_mode_enabled
 from bot.constants import (
     ADD_FULLNAME,
     ADD_FB_LINK,

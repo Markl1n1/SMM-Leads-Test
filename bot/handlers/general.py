@@ -34,6 +34,7 @@ from bot.state import (
     user_data_store_access_time,
 )
 from bot.utils import get_field_label, retry_telegram_api
+from bot.flows.check_flow import check_menu_callback
 from bot.flows.add_flow import (
     add_new_callback,
     add_field_input,
@@ -227,21 +228,24 @@ async def unknown_callback_handler(update: Update, context: ContextTypes.DEFAULT
         # Special handling for check_menu - try to activate ConversationHandler
         if callback_data == "check_menu":
             logger.info(f"[UNKNOWN_CALLBACK] check_menu callback not handled by ConversationHandler, trying to activate for user {user_id}")
-            # Clear stale state and let ConversationHandler handle it
-            if user_id:
-                clear_all_conversation_state(context, user_id)
-                # Also clear any stale ConversationHandler internal keys
-                if context.user_data:
-                    keys_to_remove = [key for key in context.user_data.keys() if key.startswith('_conversation_')]
-                    for key in keys_to_remove:
-                        del context.user_data[key]
-            # Answer callback and let ConversationHandler process it
+            # Answer callback and force fallback to check_menu_callback
             try:
                 await retry_telegram_api(query.answer)
             except:
                 pass
-            # Return None to let ConversationHandler process it
-            return None
+            try:
+                return await check_menu_callback(update, context)
+            except Exception as e:
+                logger.error(f"[UNKNOWN_CALLBACK] check_menu fallback failed: {e}", exc_info=True)
+                try:
+                    await retry_telegram_api(
+                        query.edit_message_text,
+                        text="⚠️ Не удалось открыть меню проверки. Попробуйте снова из главного меню.",
+                        reply_markup=get_main_menu_keyboard()
+                    )
+                except:
+                    pass
+                return ConversationHandler.END
         
         # Special handling for add flow callbacks - try to activate ConversationHandler
         # Includes all callbacks from add flow states (ADD_FULLNAME, ADD_FB_LINK, ADD_TELEGRAM_NAME, ADD_TELEGRAM_ID, ADD_REVIEW)

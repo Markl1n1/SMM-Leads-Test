@@ -414,6 +414,7 @@ def create_telegram_app():
         entry_points=[CallbackQueryHandler(check_menu_callback, pattern="^check_menu$")],
         states={
             SMART_CHECK_INPUT: [
+                CallbackQueryHandler(check_menu_callback, pattern="^check_menu$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, smart_check_input),
                 MessageHandler(filters.PHOTO & ~filters.FORWARDED, handle_photo_during_check),
                 CommandHandler("q", quit_command),

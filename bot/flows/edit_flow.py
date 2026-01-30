@@ -3,7 +3,7 @@ import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
-from bot.config import PIN_CODE, is_facebook_flow_enabled
+from bot.config import PIN_CODE, TABLE_NAME, is_facebook_flow_enabled
 from bot.constants import (
     EDIT_PIN,
     EDIT_MENU,
