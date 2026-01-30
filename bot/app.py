@@ -18,6 +18,7 @@ from bot.config import (
     SUPABASE_KEY,
     PIN_CODE,
     PORT,
+    is_facebook_flow_enabled,
 )
 from bot.constants import (
     SMART_CHECK_INPUT,
