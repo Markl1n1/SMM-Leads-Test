@@ -1963,6 +1963,16 @@ async def handle_photo_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         return None  # Let ConversationHandler handle it (handle_photo_during_check)
     
+    # If user is in main menu and photo has no text/caption, return to main menu
+    has_text = bool(update.message.text and update.message.text.strip())
+    has_caption = bool(update.message.caption and update.message.caption.strip())
+    if not has_text and not has_caption:
+        await update.message.reply_text(
+            "⚠️ Скриншот без текста. Возврат в главное меню.",
+            reply_markup=get_main_menu_keyboard()
+        )
+        return None
+
     # User is in main menu - show action selection
     # Extract photo and data, show selection menu
     logger.info(f"[PHOTO_MESSAGE] User {user_id} is in main menu, showing action selection")
