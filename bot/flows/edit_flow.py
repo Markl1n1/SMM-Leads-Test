@@ -674,5 +674,3 @@ async def edit_field_telegram_id_callback(update: Update, context: ContextTypes.
 async def edit_field_manager_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await edit_field_callback(update, context, 'manager_name', 'Manager Name', EDIT_MANAGER_NAME)
 
-# Flask routes
-@app.route('/')
