@@ -689,10 +689,21 @@ def detect_search_type(value: str) -> tuple[str, str]:
             if normalized:
                 return 'telegram_id', normalized
     
-    # 2. Check for Facebook link (URLs, usernames, etc.)
-    is_valid_fb, _, fb_normalized = validate_facebook_link(value_stripped)
-    if is_valid_fb:
-        return 'facebook_link', fb_normalized
+    # 2. Check for Facebook URL (with facebook.com) - check BEFORE Telegram username
+    # This handles URLs like https://www.facebook.com/username
+    value_lower = value_stripped.lower()
+    has_url_patterns = (
+        'facebook.com' in value_lower or
+        'http://' in value_lower or
+        'https://' in value_lower or
+        'www.' in value_lower
+    )
+    
+    if has_url_patterns:
+        # This is likely a Facebook URL - validate it
+        is_valid_fb, _, fb_normalized = validate_facebook_link(value_stripped)
+        if is_valid_fb:
+            return 'facebook_link', fb_normalized
     
     # 3. Check if value contains Cyrillic characters - if yes, prioritize as fullname
     # Cyrillic characters are in range \u0400-\u04FF
@@ -700,6 +711,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
     
     # 4. Check for Telegram username (letters, digits, underscores, no spaces, may start with @)
     # Skip if contains Cyrillic - it's definitely not a Telegram username
+    # Check Telegram username BEFORE Facebook username without URL (priority)
     if not has_cyrillic:
         # Remove @ if present
         username_candidate = value_stripped.replace('@', '').strip()
@@ -713,7 +725,14 @@ def detect_search_type(value: str) -> tuple[str, str]:
                 if is_valid_tg:
                     return 'telegram_user', tg_normalized
     
-    # 5. Check for fullname (contains spaces or letters, not just digits)
+    # 5. Check for Facebook username without URL (only if not Telegram username)
+    # This handles cases like "markl1n" that could be Facebook username
+    if not has_url_patterns:
+        is_valid_fb, _, fb_normalized = validate_facebook_link(value_stripped)
+        if is_valid_fb:
+            return 'facebook_link', fb_normalized
+    
+    # 6. Check for fullname (contains spaces or letters, not just digits)
     # If it contains spaces or has letters (not just digits), it's likely a name
     if ' ' in value_stripped or any(c.isalpha() for c in value_stripped):
         # Normalize text field
@@ -721,7 +740,7 @@ def detect_search_type(value: str) -> tuple[str, str]:
         if normalized and len(normalized) >= 3:  # Minimum 3 characters for name search
             return 'fullname', normalized
     
-    # 6. Unknown - cannot determine type
+    # 7. Unknown - cannot determine type
     return 'unknown', value_stripped
 
 def get_field_format_requirements(field_name: str) -> str:
@@ -3352,19 +3371,41 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         normalized_fullname = None
         normalized_facebook_link = None
         
-        # Try Facebook link normalization FIRST (before Telegram ID, as Facebook IDs are 14+ digits)
+        # Check if value has URL patterns (Facebook URL vs plain username)
+        value_lower = search_value.lower()
+        has_url_patterns = (
+            'facebook.com' in value_lower or
+            'http://' in value_lower or
+            'https://' in value_lower or
+            'www.' in value_lower
+        )
+        
+        # ALWAYS try to normalize as Telegram username (even if it's a Facebook URL)
+        # This ensures we search in telegram_user column with proper normalization
+        is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
+        if is_valid_tg_user:
+            normalized_tg_user = tg_user_normalized
+            logger.info(f"[MULTI_FIELD_SEARCH] Value can be normalized as telegram_user: '{tg_user_normalized}'")
+        
+        # Try Facebook link normalization
+        # If it has URL patterns, it's definitely a Facebook URL
+        # If it doesn't have URL patterns, it might be Facebook username (ambiguous case)
         is_valid_fb, _, fb_normalized = validate_facebook_link(search_value)
         if is_valid_fb:
             normalized_facebook_link = fb_normalized
-            # Also try to search in telegram_user with original value (in case URL was saved there)
+            logger.info(f"[MULTI_FIELD_SEARCH] Value can be normalized as facebook_link: '{fb_normalized}'")
+            
+            # If it's a Facebook URL (has URL patterns), also search in telegram_user with original value
             # This handles cases where Facebook URLs were incorrectly saved to telegram_user column
-            normalized_tg_user = search_value  # Use original value for telegram_user search
+            if has_url_patterns:
+                # Don't override normalized_tg_user if we already have it
+                # But we'll search with original value too in the search section below
+                logger.info(f"[MULTI_FIELD_SEARCH] Facebook URL detected, will also search telegram_user with original value")
         
-        # Try Telegram username normalization (only if not already identified as Facebook URL)
-        if not is_valid_fb:
-            is_valid_tg_user, _, tg_user_normalized = validate_telegram_name(search_value)
-            if is_valid_tg_user:
-                normalized_tg_user = tg_user_normalized
+        # If value is ambiguous (valid as both Telegram and Facebook username without URL)
+        # We already have both normalizations, so we'll search in both columns
+        if is_valid_tg_user and is_valid_fb and not has_url_patterns:
+            logger.info(f"[MULTI_FIELD_SEARCH] Ambiguous value: valid as both telegram_user and facebook_link (without URL), will search in both columns")
         
         # Try Telegram ID normalization (only if not already identified as Facebook ID)
         # Telegram ID = 10 digits, Facebook ID = 14+ digits
@@ -3392,16 +3433,34 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
         seen_ids = set()
         
         # Search in telegram_user (exact match)
+        # Search with normalized Telegram username value
         if normalized_tg_user:
             try:
+                logger.info(f"[MULTI_FIELD_SEARCH] Searching telegram_user with normalized value: '{normalized_tg_user}'")
                 response = client.table(TABLE_NAME).select("*").eq("telegram_user", normalized_tg_user).limit(50).execute()
                 if response.data:
+                    logger.info(f"[MULTI_FIELD_SEARCH] Found {len(response.data)} results in telegram_user with normalized value")
                     for item in response.data:
                         if item.get('id') not in seen_ids:
                             all_results.append(item)
                             seen_ids.add(item.get('id'))
             except Exception as e:
                 logger.warning(f"[MULTI_FIELD_SEARCH] Error searching telegram_user: {e}")
+        
+        # If it's a Facebook URL, also search in telegram_user with original value
+        # This handles cases where Facebook URLs were incorrectly saved to telegram_user column
+        if is_valid_fb and has_url_patterns:
+            try:
+                logger.info(f"[MULTI_FIELD_SEARCH] Searching telegram_user with original value (Facebook URL): '{search_value}'")
+                response = client.table(TABLE_NAME).select("*").eq("telegram_user", search_value).limit(50).execute()
+                if response.data:
+                    logger.info(f"[MULTI_FIELD_SEARCH] Found {len(response.data)} results in telegram_user with original value")
+                    for item in response.data:
+                        if item.get('id') not in seen_ids:
+                            all_results.append(item)
+                            seen_ids.add(item.get('id'))
+            except Exception as e:
+                logger.warning(f"[MULTI_FIELD_SEARCH] Error searching telegram_user with original value: {e}")
         
         # Search in telegram_id (exact match)
         if normalized_tg_id:
@@ -4572,8 +4631,32 @@ async def smart_check_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"[SMART_CHECK] Detected type: '{field_type}' for value: '{search_value}' (normalized: '{normalized_value}')")
     
+    # Check if value is ambiguous (could be both Telegram and Facebook username without URL)
+    # If so, use multi-field search to search in both columns
+    value_lower = search_value.lower()
+    has_url_patterns = (
+        'facebook.com' in value_lower or
+        'http://' in value_lower or
+        'https://' in value_lower or
+        'www.' in value_lower
+    )
+    
+    is_ambiguous = False
+    if field_type == 'facebook_link' and not has_url_patterns:
+        # Facebook username without URL - check if it could also be Telegram username
+        username_candidate = search_value.replace('@', '').strip()
+        if username_candidate and not ' ' in username_candidate:
+            if len(username_candidate) >= 5 and all(c.isalnum() or c in ['_', '.', '-'] for c in username_candidate):
+                is_valid_tg, _, _ = validate_telegram_name(username_candidate)
+                if is_valid_tg:
+                    is_ambiguous = True
+                    logger.info(f"[SMART_CHECK] Ambiguous value: could be both telegram_user and facebook_link, using multi-field search")
+    
     # Route to appropriate search function based on detected type
-    if field_type == 'facebook_link':
+    if field_type == 'facebook_link' and is_ambiguous:
+        # Ambiguous case - use multi-field search to search in both columns
+        return await check_by_multiple_fields(update, context, search_value)
+    elif field_type == 'facebook_link':
         # Use existing check_by_field for Facebook link
         return await check_by_field(update, context, "facebook_link", "Facebook Ссылка", SMART_CHECK_INPUT)
     
