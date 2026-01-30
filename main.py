@@ -2058,8 +2058,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cleanup_all_messages_before_main_menu(update, context)
         
         welcome_message = (
-            "👋 <b>Добро пожаловать в ClientsBot!</b>\n\n"
-            "Вы вернулись в главное меню. Текущие сценарии сброшены.\n\n"
+            "👋 Добро пожаловать в ClientsBot!\n\n"
+            "Главное меню\n\n"
             "Выберите действие:"
         )
         await retry_telegram_api(
@@ -7187,18 +7187,30 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if had_photo and not photo_file_id_exists:
             # User expected photo to be saved, but it was lost
             logger.warning(f"[ADD_SAVE] Photo was expected (had_photo=True) but photo_file_id is missing for user {user_id}")
-            await query.edit_message_text(
-                "⚠️ <b>Предупреждение:</b> Прикреплённое изображение не удалось сохранить.\n\n"
-                "💡 <b>Что можно сделать:</b>\n"
-                "• Сохранить лид без фото (нажмите «Сохранить» ещё раз)\n"
-                "• Отменить и добавить лид заново с фото\n"
-                "• Попробовать прикрепить фото снова",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("💾 Сохранить без фото", callback_data="add_save_force")],
-                    [InlineKeyboardButton("❌ Отменить", callback_data="add_cancel")]
-                ]),
-                parse_mode='HTML'
-            )
+            if is_minimal_add_mode_enabled():
+                await query.edit_message_text(
+                    "⚠️ <b>Предупреждение:</b> Прикреплённое изображение не удалось сохранить.\n\n"
+                    "💡 <b>Что можно сделать:</b>\n"
+                    "• Отменить и добавить лид заново с фото\n"
+                    "• Попробовать прикрепить фото снова",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("❌ Отменить", callback_data="add_cancel")]
+                    ]),
+                    parse_mode='HTML'
+                )
+            else:
+                await query.edit_message_text(
+                    "⚠️ <b>Предупреждение:</b> Прикреплённое изображение не удалось сохранить.\n\n"
+                    "💡 <b>Что можно сделать:</b>\n"
+                    "• Сохранить лид без фото (нажмите «Сохранить» ещё раз)\n"
+                    "• Отменить и добавить лид заново с фото\n"
+                    "• Попробовать прикрепить фото снова",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("💾 Сохранить без фото", callback_data="add_save_force")],
+                        [InlineKeyboardButton("❌ Отменить", callback_data="add_cancel")]
+                    ]),
+                    parse_mode='HTML'
+                )
             return ADD_REVIEW
         
         # Prepare data for saving - map telegram_name to telegram_user for database compatibility
