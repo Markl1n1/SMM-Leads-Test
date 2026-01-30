@@ -511,99 +511,113 @@ def validate_facebook_link(link: str) -> tuple[bool, str, str]:
         error_msg = "Неверный формат Facebook ссылки."
         return False, error_msg, ""
     
-    # Remove http:// or https:// if present
-    if link_clean.startswith('http://'):
-        link_clean = link_clean[7:]
-    elif link_clean.startswith('https://'):
-        link_clean = link_clean[8:]
-    
-    # Remove www. if present
-    if link_clean.startswith('www.'):
-        link_clean = link_clean[4:]
-    
-    # Remove facebook.com/ or m.facebook.com/ if present
-    if link_clean.lower().startswith('facebook.com/'):
-        link_clean = link_clean[13:]
-    elif link_clean.lower().startswith('m.facebook.com/'):
-        link_clean = link_clean[15:]
-    
-    # Handle profile.php?id= format or any link with id= parameter - extract ONLY the ID number
-    if 'id=' in link_clean:
-        # Extract ID from query string - look for id= parameter
-        # Handle cases like:
-        # - profile.php?id=123456
-        # - profile.php?id=123456&ref=...
-        # - profile.php?id=123456] (with trailing characters)
-        # - profile.php?id=123456/extra/path (with additional paths)
-        # - ?id=123456 (without profile.php)
-        # - /people/Name/123456 (alternative format)
+    # Parse URL to extract path and query more reliably using urlparse
+    try:
+        # Ensure URL has protocol for urlparse
+        url_to_parse = link_clean if link_clean.startswith('http') else f'https://{link_clean}'
+        parsed = urlparse(url_to_parse)
+        path = parsed.path.strip('/')
+        query = parsed.query
         
-        # Extract everything after id=
-        id_part_raw = link_clean.split('id=')[-1]
-        
-        # Remove query parameters (&), hash fragments (#), and any trailing characters
-        # Extract only the numeric ID part, ignoring any non-digit characters after it
-        id_part = ""
-        for char in id_part_raw:
-            if char.isdigit():
-                id_part += char
-            elif char in ['&', '#', '?', '/', '\\', ']', '[', ')', '(', '}', '{', ' ', '\t', '\n']:
-                # Stop at first non-digit separator character
-                break
-            else:
-                # If we encounter a non-digit, non-separator character, it might be part of the ID
-                # But typically Facebook IDs are only digits, so we stop here
-                break
-        
-        # Also check for alternative format: /people/Name/123456
-        if not id_part or not id_part.isdigit():
-            # Try to extract ID from path like /people/Name/123456
-            path_parts = link_clean.split('/')
-            for part in reversed(path_parts):
-                # Extract only digits from the part
-                digits_only = ''.join(filter(str.isdigit, part))
-                if digits_only and len(digits_only) > 5:  # Facebook IDs are usually long numbers
-                    id_part = digits_only
-                    break
-        
-        # Validate that ID contains only digits and has reasonable length
-        if id_part and id_part.isdigit() and len(id_part) >= 5:
-            return True, "", id_part
-        else:
-            return False, "Не удалось извлечь Facebook ID из ссылки. Убедитесь, что ссылка содержит корректный ID.", ""
-    
-    # For username format: extract just the username (last part after /)
-    # Remove query parameters if present
-    if '?' in link_clean:
-        link_clean = link_clean.split('?')[0]
-    
-    # Remove hash fragments if present
-    if '#' in link_clean:
-        link_clean = link_clean.split('#')[0]
-    
-    # Remove trailing slash and any trailing non-alphanumeric characters
-    link_clean = link_clean.rstrip('/')
-    
-    # Remove any trailing brackets, parentheses, or other special characters
-    # Keep only alphanumeric, dots, underscores, and hyphens for username
-    while link_clean and not link_clean[-1].isalnum() and link_clean[-1] not in ['.', '_', '-']:
-        link_clean = link_clean[:-1]
-    
-    # Extract username (last part after /)
-    parts = link_clean.split('/')
-    if len(parts) > 0:
-        # Get the last non-empty part (username)
-        extracted = parts[-1] if parts[-1] else (parts[-2] if len(parts) > 1 else "")
-        
-        # Clean extracted username from any trailing special characters
-        if extracted:
-            # Remove any trailing non-alphanumeric characters (except dots, underscores, hyphens)
-            cleaned_username = extracted
-            while cleaned_username and not cleaned_username[-1].isalnum() and cleaned_username[-1] not in ['.', '_', '-']:
-                cleaned_username = cleaned_username[:-1]
+        # Handle profile.php?id= format or any link with id= parameter - extract ONLY the ID number
+        if 'id=' in query or 'id=' in link_clean:
+            # Extract ID from query string
+            id_value = None
+            if 'id=' in query:
+                id_value = parse_qs(query).get('id', [None])[0]
+            elif 'id=' in link_clean:
+                # Fallback: extract from link_clean directly
+                id_part_raw = link_clean.split('id=')[-1]
+                id_part = ""
+                for char in id_part_raw:
+                    if char.isdigit():
+                        id_part += char
+                    elif char in ['&', '#', '?', '/', '\\', ']', '[', ')', '(', '}', '{', ' ', '\t', '\n']:
+                        break
+                    else:
+                        break
+                if id_part and id_part.isdigit() and len(id_part) >= 5:
+                    return True, "", id_part
             
-            if cleaned_username:
-                return True, "", cleaned_username
+            if id_value:
+                # Extract only digits from ID value
+                id_digits = ''.join(filter(str.isdigit, str(id_value)))
+                if id_digits and len(id_digits) >= 5:
+                    return True, "", id_digits
+        
+        # For username format: extract just the username (last part of path)
+        if path:
+            # Remove any leading/trailing slashes and split
+            path_parts = [p for p in path.split('/') if p]
+            if path_parts:
+                # Get the last part (username)
+                username = path_parts[-1]
+                
+                # Remove query parameters if somehow included in path
+                if '?' in username:
+                    username = username.split('?')[0]
+                if '#' in username:
+                    username = username.split('#')[0]
+                
+                # Clean username from any trailing special characters
+                # Keep only alphanumeric, dots, underscores, and hyphens
+                cleaned_username = username
+                while cleaned_username and not cleaned_username[-1].isalnum() and cleaned_username[-1] not in ['.', '_', '-']:
+                    cleaned_username = cleaned_username[:-1]
+                
+                if cleaned_username:
+                    return True, "", cleaned_username
+        
+        # Fallback: if path is empty but we have a valid Facebook URL, try old method
+        # This handles edge cases where urlparse might not work as expected
+        link_clean_old = link_clean
+        
+        # Remove http:// or https:// if present
+        if link_clean_old.startswith('http://'):
+            link_clean_old = link_clean_old[7:]
+        elif link_clean_old.startswith('https://'):
+            link_clean_old = link_clean_old[8:]
+        
+        # Remove www. if present
+        if link_clean_old.startswith('www.'):
+            link_clean_old = link_clean_old[4:]
+        
+        # Remove facebook.com/ or m.facebook.com/ if present
+        if link_clean_old.lower().startswith('facebook.com/'):
+            link_clean_old = link_clean_old[13:]
+        elif link_clean_old.lower().startswith('m.facebook.com/'):
+            link_clean_old = link_clean_old[15:]
+        
+        # Remove query parameters and hash fragments
+        if '?' in link_clean_old:
+            link_clean_old = link_clean_old.split('?')[0]
+        if '#' in link_clean_old:
+            link_clean_old = link_clean_old.split('#')[0]
+        
+        # Remove trailing slash
+        link_clean_old = link_clean_old.rstrip('/')
+        
+        # Remove any trailing special characters
+        while link_clean_old and not link_clean_old[-1].isalnum() and link_clean_old[-1] not in ['.', '_', '-']:
+            link_clean_old = link_clean_old[:-1]
+        
+        # Extract username (last part after /)
+        parts = link_clean_old.split('/')
+        if parts:
+            extracted = parts[-1] if parts[-1] else (parts[-2] if len(parts) > 1 else "")
+            
+            if extracted:
+                # Clean extracted username
+                cleaned_username = extracted
+                while cleaned_username and not cleaned_username[-1].isalnum() and cleaned_username[-1] not in ['.', '_', '-']:
+                    cleaned_username = cleaned_username[:-1]
+                
+                if cleaned_username:
+                    return True, "", cleaned_username
+        
+    except Exception as e:
+        logger.error(f"[VALIDATE_FB_LINK] Error parsing URL: {e}, link: {link_clean}")
+        # Fall through to error
     
     error_msg = "Неверный формат Facebook ссылки."
     return False, error_msg, ""
@@ -5120,6 +5134,23 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return current_state
     
     elif field_name == 'telegram_name':
+        # First check if the input is a Facebook URL - if so, reject it
+        is_fb_url, fb_error_msg, _ = validate_facebook_link(text)
+        if is_fb_url:
+            field_label = get_field_label('telegram_name')
+            requirements = get_field_format_requirements('telegram_name')
+            sent_message = await update.message.reply_text(
+                f"❌ <b>Ошибка:</b> Вы ввели Facebook ссылку в поле \"{field_label}\".\n\n"
+                f"💡 <b>Что делать:</b>\n"
+                f"• Для Facebook ссылки используйте соответствующее поле (если доступно)\n"
+                f"• Для Telegram username введите только username без URL\n\n"
+                f"📝 Введите {field_label}:\n\n{requirements}",
+                reply_markup=get_navigation_keyboard(is_optional=True, show_back=True),
+                parse_mode='HTML'
+            )
+            await save_add_message(update, context, sent_message.message_id)
+            return current_state
+        
         is_valid, error_msg, normalized = validate_telegram_name(text)
         if is_valid:
             validation_passed = True
