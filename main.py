@@ -7084,11 +7084,16 @@ async def add_save_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return ConversationHandler.END
     else:
-        # Minimal mode: require photo
+        # Minimal mode: require photo only when no identifiers were provided
+        required_fields = ['telegram_name', 'telegram_id']
+        if is_facebook_flow_enabled():
+            required_fields.append('facebook_link')
+        has_identifier = any(user_data.get(field) for field in required_fields)
+
         had_photo = user_data.get('had_photo') or (user_id in user_data_store and user_data_store[user_id].get('had_photo'))
         photo_file_id_exists = 'photo_file_id' in user_data or (user_id in user_data_store and 'photo_file_id' in user_data_store[user_id])
         
-        if not had_photo and not photo_file_id_exists:
+        if not has_identifier and not had_photo and not photo_file_id_exists:
             error_msg = "❌ <b>Ошибка:</b> В режиме минимального добавления необходимо прикрепить фото.\n\n"
             error_msg += "💡 <b>Что нужно сделать:</b>\n"
             error_msg += "• Прикрепите фото к сообщению с именем клиента\n"
