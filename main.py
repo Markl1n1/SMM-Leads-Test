@@ -5366,7 +5366,26 @@ async def add_field_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif field_name == 'telegram_name':
         # First check if the input is a Facebook URL - if so, reject it
-        is_fb_url, fb_error_msg, _ = validate_facebook_link(text)
+        text_lower = text.lower()
+        has_url_patterns = (
+            'facebook.com' in text_lower or
+            'http://' in text_lower or
+            'https://' in text_lower or
+            'www.' in text_lower
+        )
+        is_fb_url = False
+        if has_url_patterns:
+            is_fb_url, fb_error_msg, _ = validate_facebook_link(text)
+        text_lower = text.lower()
+        has_url_patterns = (
+            'facebook.com' in text_lower or
+            'http://' in text_lower or
+            'https://' in text_lower or
+            'www.' in text_lower
+        )
+        is_fb_url = False
+        if has_url_patterns:
+            is_fb_url, fb_error_msg, _ = validate_facebook_link(text)
         if is_fb_url:
             field_label = get_field_label('telegram_name')
             requirements = get_field_format_requirements('telegram_name')
