@@ -3821,9 +3821,6 @@ async def check_by_field(update: Update, context: ContextTypes.DEFAULT_TYPE, fie
             logger.info(f"[{search_type}] Query executed. Response type: {type(response)}, has data: {hasattr(response, 'data')}")
             logger.info(f"[{search_type}] Response.data length: {len(response.data) if hasattr(response, 'data') and response.data else 0}")
             response_data = response.data if response.data else []
-        else:
-            # For telegram_user with normal username, response_data is already set above
-            pass
     
     # Get Supabase client (for all other fields, not telegram_user)
     if field_name != "telegram_user":
