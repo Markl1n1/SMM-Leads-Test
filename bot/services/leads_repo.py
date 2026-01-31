@@ -185,6 +185,43 @@ def count_records_by_manager_name(client, manager_name: str) -> int:
         return 0
 
 
+def get_manager_tag_by_name(client, manager_name: str) -> str:
+    """Get manager_tag for given manager_name (first non-empty)"""
+    try:
+        response = (
+            client.table(TABLE_NAME)
+            .select("manager_tag")
+            .eq("manager_name", manager_name)
+            .limit(1)
+            .execute()
+        )
+        if response.data and response.data[0].get("manager_tag"):
+            return response.data[0].get("manager_tag")
+        return ""
+    except Exception as e:
+        logger.error(f"Error getting manager_tag for {manager_name}: {e}", exc_info=True)
+        return ""
+
+
+@retry_supabase_query(max_retries=3, delay=1, backoff=2)
+def transfer_manager_leads(client, from_manager: str, to_manager: str, to_tag: str) -> int:
+    """Transfer all leads from one manager to another (update manager_name + manager_tag)"""
+    normalized_tag = normalize_tag(to_tag) if to_tag else ""
+    response = (
+        client
+        .table(TABLE_NAME)
+        .update({"manager_name": to_manager, "manager_tag": normalized_tag})
+        .eq("manager_name", from_manager)
+        .execute()
+    )
+    updated_count = len(response.data) if response.data else 0
+    logger.info(
+        f"[TRANSFER] Updated manager_name from '{from_manager}' to '{to_manager}', "
+        f"manager_tag='{normalized_tag}'. Updated {updated_count} records."
+    )
+    return updated_count
+
+
 def check_field_uniqueness(client, field_name: str, field_value: str) -> bool:
     """Check if a field value already exists in the database (with retry and cache)"""
     if not field_value or field_value.strip() == '':

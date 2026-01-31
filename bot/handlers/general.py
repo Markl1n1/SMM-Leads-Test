@@ -21,6 +21,10 @@ from bot.constants import (
     TAG_SELECT_MANAGER,
     TAG_ENTER_NEW,
     SMART_CHECK_INPUT,
+    TRANSFER_PIN,
+    TRANSFER_SELECT_FROM,
+    TRANSFER_SELECT_TO,
+    TRANSFER_CONFIRM,
 )
 from bot.keyboards import get_main_menu_keyboard, get_navigation_keyboard, get_add_menu_keyboard
 from bot.logging import logger
@@ -558,6 +562,18 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
             "not intercepting message"
         )
         return None
+
+    # Check for transfer flow indicators
+    transfer_from_manager = context.user_data.get('transfer_from_manager')
+    transfer_to_manager = context.user_data.get('transfer_to_manager')
+    transfer_manager_names = context.user_data.get('transfer_manager_names')
+    if transfer_from_manager or transfer_to_manager or transfer_manager_names:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in transfer flow "
+            f"(from={bool(transfer_from_manager)}, to={bool(transfer_to_manager)}), "
+            "not intercepting message"
+        )
+        return None
     
     # Check for edit flow indicators (even if current_state is not set correctly)
     editing_lead_id = context.user_data.get('editing_lead_id')
@@ -574,6 +590,15 @@ async def check_add_state_entry(update: Update, context: ContextTypes.DEFAULT_TY
     if current_state in tag_states:
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in tag flow (state={current_state}), "
+            "not intercepting message"
+        )
+        return None
+
+    # Transfer flow states
+    transfer_states = {TRANSFER_PIN, TRANSFER_SELECT_FROM, TRANSFER_SELECT_TO, TRANSFER_CONFIRM}
+    if current_state in transfer_states:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY] User {user_id} is in transfer flow (state={current_state}), "
             "not intercepting message"
         )
         return None
@@ -631,6 +656,17 @@ async def check_add_state_entry_callback(update: Update, context: ContextTypes.D
         # User is in tag/edit flow, don't activate add flow
         logger.info(
             f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} is in tag/edit flow, "
+            "not activating add flow"
+        )
+        return None
+
+    # Transfer flow indicators
+    transfer_from_manager = context.user_data.get('transfer_from_manager')
+    transfer_to_manager = context.user_data.get('transfer_to_manager')
+    transfer_manager_names = context.user_data.get('transfer_manager_names')
+    if transfer_from_manager or transfer_to_manager or transfer_manager_names:
+        logger.info(
+            f"[CHECK_ADD_STATE_ENTRY_CALLBACK] User {user_id} is in transfer flow, "
             "not activating add flow"
         )
         return None

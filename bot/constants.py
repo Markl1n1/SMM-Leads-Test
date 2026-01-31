@@ -23,6 +23,11 @@
     # Tag states
     TAG_PIN,
     TAG_SELECT_MANAGER,
-    TAG_ENTER_NEW
-) = range(21)
+    TAG_ENTER_NEW,
+    # Transfer states
+    TRANSFER_PIN,
+    TRANSFER_SELECT_FROM,
+    TRANSFER_SELECT_TO,
+    TRANSFER_CONFIRM
+) = range(25)
 

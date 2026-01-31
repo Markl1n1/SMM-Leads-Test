@@ -41,6 +41,10 @@ from bot.constants import (
     TAG_PIN,
     TAG_SELECT_MANAGER,
     TAG_ENTER_NEW,
+    TRANSFER_PIN,
+    TRANSFER_SELECT_FROM,
+    TRANSFER_SELECT_TO,
+    TRANSFER_CONFIRM,
 )
 from bot.logging import logger
 from bot.state import (
@@ -125,6 +129,14 @@ from bot.flows.tag_flow import (
     tag_enter_new,
     tag_confirm_callback,
     tag_cancel_callback,
+)
+from bot.flows.transfer_flow import (
+    transfer_command,
+    transfer_pin_input,
+    transfer_from_callback,
+    transfer_to_callback,
+    transfer_confirm_callback,
+    transfer_cancel_callback,
 )
 
 # Try to monkeypatch httpx.Client to intercept proxy argument (silent in production)
@@ -643,6 +655,44 @@ def create_telegram_app():
     )
     telegram_app.add_handler(edit_conv)
     
+    # Transfer conversation handler - for reassigning leads between managers
+    transfer_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("transfer", transfer_command),
+            CallbackQueryHandler(transfer_from_callback, pattern="^transfer_from_\\d+$"),
+            CallbackQueryHandler(transfer_to_callback, pattern="^transfer_to_\\d+$"),
+        ],
+        states={
+            TRANSFER_PIN: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, transfer_pin_input),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+            TRANSFER_SELECT_FROM: [
+                CallbackQueryHandler(transfer_from_callback, pattern="^transfer_from_\\d+$"),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+            TRANSFER_SELECT_TO: [
+                CallbackQueryHandler(transfer_to_callback, pattern="^transfer_to_\\d+$"),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+            TRANSFER_CONFIRM: [
+                CallbackQueryHandler(transfer_confirm_callback, pattern="^transfer_confirm$"),
+                CallbackQueryHandler(transfer_cancel_callback, pattern="^transfer_cancel$"),
+                CommandHandler("q", quit_command),
+                CommandHandler("start", start_command),
+            ],
+        },
+        fallbacks=[
+            CommandHandler("q", quit_command),
+            CommandHandler("start", start_command),
+        ],
+        per_message=False,
+    )
+    telegram_app.add_handler(transfer_conv)
+
     # Tag conversation handler - for changing manager_tag
     tag_conv = ConversationHandler(
         entry_points=[
@@ -712,7 +762,7 @@ def create_telegram_app():
     
     # Add handler for unknown commands during conversations (must be after command handlers)
     # Exclude /start, /q, /skip, and /tag (skip is handled by ConversationHandlers, tag should interrupt any process)
-    telegram_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex("^(/start|/q|/skip|/tag)$"), unknown_command_handler))
+    telegram_app.add_handler(MessageHandler(filters.COMMAND & ~filters.Regex("^(/start|/q|/skip|/tag|/transfer)$"), unknown_command_handler))
     
     # Add global fallback for unknown callback queries (must be last, after all ConversationHandlers)
     telegram_app.add_handler(CallbackQueryHandler(unknown_callback_handler))
