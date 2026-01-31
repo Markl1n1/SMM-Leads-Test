@@ -39,6 +39,7 @@ from bot.utils import (
     normalize_text_field,
     retry_telegram_api,
     validate_facebook_link,
+    validate_telegram_id,
     validate_telegram_name,
 )
 
