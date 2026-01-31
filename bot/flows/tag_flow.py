@@ -2,12 +2,17 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from bot.config import PIN_CODE
-from bot.constants import TAG_PIN, TAG_SELECT_MANAGER, TAG_ENTER_NEW
+from bot.constants import TAG_PIN, TAG_SELECT_MANAGER, TAG_ENTER_NEW, SMART_CHECK_INPUT
 from bot.keyboards import get_main_menu_keyboard
 from bot.logging import logger
 from bot.services.leads_repo import get_unique_manager_names, count_records_by_manager_name, update_manager_tag_by_name
 from bot.services.supabase_client import get_supabase_client
-from bot.state import clear_all_conversation_state, user_data_store, user_data_store_access_time
+from bot.state import (
+    clear_all_conversation_state,
+    log_conversation_state,
+    user_data_store,
+    user_data_store_access_time,
+)
 from bot.utils import escape_html, get_user_friendly_error, normalize_tag
 
 async def tag_command(update: Update, context: ContextTypes.DEFAULT_TYPE):

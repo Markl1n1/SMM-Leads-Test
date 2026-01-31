@@ -18,12 +18,19 @@ from bot.keyboards import get_main_menu_keyboard, get_edit_field_keyboard
 from bot.logging import logger
 from bot.services.supabase_client import get_supabase_client
 from bot.services.leads_repo import ensure_lead_identifiers_unique, UNIQUENESS_FIELD_LABELS
-from bot.state import clear_all_conversation_state, user_data_store, user_data_store_access_time, log_conversation_state
+from bot.state import (
+    clear_all_conversation_state,
+    cleanup_user_data_store,
+    log_conversation_state,
+    user_data_store,
+    user_data_store_access_time,
+)
 from bot.utils import (
     escape_html,
     format_facebook_link_for_display,
     get_field_label,
     get_user_friendly_error,
+    normalize_text_field,
     validate_facebook_link,
     validate_telegram_id,
     validate_telegram_name,

@@ -38,6 +38,9 @@ from bot.flows.check_flow import check_menu_callback
 from bot.flows.add_flow import (
     add_new_callback,
     add_field_input,
+    add_skip_callback,
+    add_back_callback,
+    add_cancel_callback,
     add_save_callback,
     add_edit_field_fullname_from_review_callback,
     add_edit_field_telegram_name_from_review_callback,
