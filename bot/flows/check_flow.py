@@ -1,9 +1,11 @@
+import csv
 import io
 import re
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
+from telegram.error import BadRequest
 
 from bot.config import TABLE_NAME, is_facebook_flow_enabled
 from bot.constants import (
@@ -39,6 +41,59 @@ from bot.utils import (
     validate_facebook_link,
     validate_telegram_name,
 )
+
+TELEGRAM_MESSAGE_CHAR_LIMIT = 3800
+
+
+def _make_results_csv_bytes(results: list[dict], field_labels: dict) -> bytes:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([field_labels[key] for key in field_labels.keys()])
+
+    for result in results:
+        row = []
+        for field_name_key in field_labels.keys():
+            value = result.get(field_name_key)
+            if value is None:
+                row.append("")
+                continue
+            if field_name_key == 'created_at':
+                try:
+                    dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+                    value = dt.strftime('%d.%m.%Y %H:%M')
+                except Exception:
+                    pass
+            elif field_name_key == 'facebook_link':
+                value = format_facebook_link_for_display(value)
+            elif field_name_key == 'manager_tag':
+                tag_value = str(value).strip()
+                value = f"@{tag_value}" if tag_value else ""
+            row.append(str(value))
+
+        writer.writerow(row)
+
+    return output.getvalue().encode("utf-8-sig")
+
+
+def _make_results_csv_filename(search_value: str) -> str:
+    safe = re.sub(r'[^a-zA-Z0-9_-]+', '_', search_value.strip().lower()).strip('_')
+    if not safe:
+        safe = "results"
+    date_str = datetime.utcnow().strftime('%Y-%m-%d')
+    return f"agent-{safe}-{date_str}.csv"
+
+
+async def _send_results_as_csv(update: Update, results: list[dict], field_labels: dict, search_value: str):
+    csv_bytes = _make_results_csv_bytes(results, field_labels)
+    filename = _make_results_csv_filename(search_value)
+    file_obj = io.BytesIO(csv_bytes)
+    file_obj.name = filename
+    caption = "⚠️ Результатов слишком много для сообщения, отправляю файлом."
+    return await update.message.reply_document(
+        document=file_obj,
+        filename=filename,
+        caption=caption
+    )
 
 
 async def send_lead_with_photo(update: Update, result: dict, idx: int, total: int, reply_markup: InlineKeyboardMarkup) -> bool:
@@ -684,11 +739,32 @@ async def check_by_multiple_fields(update: Update, context: ContextTypes.DEFAULT
                     [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                sent_message = await update.message.reply_text(
-                    message,
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
+
+                if len(message) > TELEGRAM_MESSAGE_CHAR_LIMIT:
+                    sent_message = await _send_results_as_csv(
+                        update,
+                        all_results,
+                        field_labels,
+                        search_value
+                    )
+                else:
+                    try:
+                        sent_message = await update.message.reply_text(
+                            message,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                    except BadRequest as e:
+                        if "Message is too long" in str(e):
+                            sent_message = await _send_results_as_csv(
+                                update,
+                                all_results,
+                                field_labels,
+                                search_value
+                            )
+                        else:
+                            raise
+
                 await save_check_message(update, context, sent_message.message_id)
         else:
             message = (
