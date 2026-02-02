@@ -76,10 +76,11 @@ async def upload_lead_photo_to_supabase(bot, file_id: str, lead_id: int) -> str 
         logger.info(f"[PHOTO] Downloaded photo for lead {lead_id}: {file_size} bytes, extension: {ext}")
         storage_path = build_lead_photo_path(lead_id, ext)
         logger.info(f"[PHOTO] Uploading photo to Supabase bucket '{SUPABASE_LEADS_BUCKET}' with path '{storage_path}'")
+        content_type = "image/jpeg" if ext == "jpg" else f"image/{ext}"
         upload_response = client.storage.from_(SUPABASE_LEADS_BUCKET).upload(
             storage_path,
             file_bytes,
-            {"content-type": f"image/{ext}"}
+            {"content-type": content_type}
         )
         if upload_response:
             public_url = client.storage.from_(SUPABASE_LEADS_BUCKET).get_public_url(storage_path)

@@ -39,7 +39,7 @@ CREATE POLICY "Allow all operations for service role" ON facebook_leads
 
 ### 1.2. Storage bucket
 - Storage → создать bucket `Leads` (или другое имя)
-- Разрешённые типы: `image/jpeg`, `image/png`, `image/webp`
+- Разрешённые типы: `image/jpeg`, `image/jpg`, `image/png`, `image/webp`
 - Ограничение размера: по вашему лимиту
 - Public: включите, если нужны публичные ссылки на фото
 
