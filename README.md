@@ -13,11 +13,11 @@
 CREATE TABLE IF NOT EXISTS facebook_leads (
     id BIGSERIAL PRIMARY KEY,
     fullname TEXT,
+    manager_name TEXT,
+    manager_tag TEXT,
     telegram_user TEXT,
     telegram_id TEXT,
     facebook_link TEXT,
-    manager_name TEXT,
-    manager_tag TEXT,
     photo_url TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
