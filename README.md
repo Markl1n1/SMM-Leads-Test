@@ -2,7 +2,7 @@
 
 ## 0. Нужно заранее
 - Аккаунты: [Supabase](https://supabase.com), [Koyeb](https://www.koyeb.com), Telegram
-- Репозиторий с файлами: `main.py`, `requirements.txt`, `Procfile`
+- Создайте новый [Github](https://github.com) репозиторий и импортируйте туда [SMM-Bot](https://github.com/Markl1n1/SMM-Leads-Test.git).
 
 ## 1. Supabase
 
@@ -57,7 +57,7 @@ CREATE POLICY "Allow all operations for service role" ON facebook_leads
 
 ### 3.1. Подключение репозитория
 1. Загрузите файлы проекта в GitHub
-2. Koyeb → **Create App** → **GitHub** → выберите репозиторий
+2. Koyeb → **Create App** → **GitHub** → выберите репозиторий (который вы создали на шаге 0)
 
 ### 3.2. Переменные окружения
 Добавьте в **Environment Variables**:
