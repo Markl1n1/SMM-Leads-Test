@@ -1385,11 +1385,33 @@ async def check_by_fullname(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                     [InlineKeyboardButton("🏠 Главное меню", callback_data="main_menu")]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                sent_message = await update.message.reply_text(
-                    message,
-                    reply_markup=reply_markup,
-                    parse_mode='HTML'
-                )
+
+                # Проверка длины сообщения перед отправкой
+                if len(message) > TELEGRAM_MESSAGE_CHAR_LIMIT:
+                    sent_message = await _send_results_as_csv(
+                        update,
+                        all_results,
+                        field_labels,
+                        search_value
+                    )
+                else:
+                    try:
+                        sent_message = await update.message.reply_text(
+                            message,
+                            reply_markup=reply_markup,
+                            parse_mode='HTML'
+                        )
+                    except BadRequest as e:
+                        if "Message is too long" in str(e):
+                            logger.warning(f"[FULLNAME SEARCH] Message too long, sending as CSV instead")
+                            sent_message = await _send_results_as_csv(
+                                update,
+                                all_results,
+                                field_labels,
+                                search_value
+                            )
+                        else:
+                            raise
                 await save_check_message(update, context, sent_message.message_id)
         else:
             message = (
